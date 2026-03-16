@@ -5,7 +5,7 @@
 #
 set -euo pipefail
 
-VERSION="0.9.2"
+VERSION="0.9.3"
 REPO="gwatts/claude-compound-bash"
 BINARY_NAME="claude-compound-bash"
 
@@ -62,17 +62,32 @@ download_binary() {
     local url="https://github.com/${REPO}/releases/download/v${VERSION}/${archive_name}"
     local tmp_dir
 
-    tmp_dir="$(mktemp -d)"
-    trap 'rm -rf "${tmp_dir}"' RETURN
+    tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/ccb.XXXXXX")"
+
+    # cleanup_tmp removes the temp directory, with a safety check.
+    cleanup_tmp() {
+        if [[ -n "${tmp_dir}" && -d "${tmp_dir}" && "${tmp_dir}" == */ccb.* ]]; then
+            rm -r "${tmp_dir}"
+        fi
+    }
 
     echo "Downloading ${BINARY_NAME} v${VERSION} for ${platform}..." >&2
 
     if command -v curl >/dev/null 2>&1; then
-        curl -fsSL -o "${tmp_dir}/${archive_name}" "${url}"
+        if ! curl -fsSL -o "${tmp_dir}/${archive_name}" "${url}"; then
+            echo "Download failed: ${url}" >&2
+            cleanup_tmp
+            return 1
+        fi
     elif command -v wget >/dev/null 2>&1; then
-        wget -q -O "${tmp_dir}/${archive_name}" "${url}"
+        if ! wget -q -O "${tmp_dir}/${archive_name}" "${url}"; then
+            echo "Download failed: ${url}" >&2
+            cleanup_tmp
+            return 1
+        fi
     else
         echo "Neither curl nor wget found" >&2
+        cleanup_tmp
         return 1
     fi
 
@@ -86,11 +101,13 @@ download_binary() {
         mv "${tmp_dir}/${BINARY_NAME}" "${BINARY}"
     else
         echo "Binary not found in archive" >&2
+        cleanup_tmp
         return 1
     fi
 
     chmod +x "${BINARY}"
     echo "${VERSION}" > "${VERSION_FILE}"
+    cleanup_tmp
 }
 
 # Ensure the correct version of the binary is available.
