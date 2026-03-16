@@ -18,9 +18,10 @@ builds:
 
 archives:
   - id: claude-compound-bash
-    builds:
+    ids:
       - claude-compound-bash
-    format: tar.gz
+    formats:
+      - tar.gz
     name_template: "claude-compound-bash_{{ .Os }}_{{ .Arch }}"
 
 checksum:
@@ -28,8 +29,10 @@ checksum:
 
 changelog:
   sort: asc
+  use: github
   filters:
     exclude:
       - "^docs:"
       - "^test:"
       - "^ci:"
+      - "^release:"
