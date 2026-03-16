@@ -1,0 +1,6 @@
+{
+  "name": "compound-bash",
+  "description": "Auto-approve compound bash commands when every sub-command matches your allow rules",
+  "version": "1.0.0",
+  "author": "gwatts"
+}
