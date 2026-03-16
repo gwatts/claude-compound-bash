@@ -33,10 +33,11 @@ Parses compound commands using [`mvdan.cc/sh/v3`](https://pkg.go.dev/mvdan.cc/sh
 
 ### Plugin (recommended)
 
-No Go toolchain required. Install directly from the repo:
+No Go toolchain required. Add the marketplace and install the plugin:
 
 ```
-/install-plugin https://github.com/gwatts/claude-compound-bash.git
+/plugin marketplace add gwatts/claude
+/plugin install compound-bash@gwatts
 ```
 
 The plugin automatically downloads a pre-built binary for your platform (macOS, Linux, Windows via WSL/Git Bash) on first use.
