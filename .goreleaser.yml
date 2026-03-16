@@ -29,7 +29,7 @@ checksum:
 
 changelog:
   sort: asc
-  use: github
+  abbrev: 7
   filters:
     exclude:
       - "^docs:"
