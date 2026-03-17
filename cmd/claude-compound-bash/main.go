@@ -87,14 +87,15 @@ func run() error {
 	}
 
 	allowPatterns := matcher.ParsePatterns(perms.Allow)
+	askPatterns := matcher.ParsePatterns(perms.Ask)
 	denyPatterns := matcher.ParsePatterns(perms.Deny)
-	log.Log("loaded %d allow, %d deny patterns from %v", len(allowPatterns), len(denyPatterns), perms.Sources)
+	log.Log("loaded %d allow, %d ask, %d deny patterns from %v", len(allowPatterns), len(askPatterns), len(denyPatterns), perms.Sources)
 	if len(allowPatterns) == 0 {
 		log.Log("ASK: no allow patterns configured")
 		return writeAsk(os.Stdout, "no allow patterns configured")
 	}
 
-	result := hook.Process(&input, allowPatterns, denyPatterns, log)
+	result := hook.Process(&input, allowPatterns, askPatterns, denyPatterns, log)
 
 	var output []byte
 	switch result.Kind {

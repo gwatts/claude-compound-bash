@@ -67,7 +67,7 @@ type Result struct {
 // Process evaluates a hook input against the given allow and deny patterns.
 // If any sub-command matches a deny pattern, the result is not allowed (defers
 // to Claude Code). This matches Claude Code's own "deny always wins" semantics.
-func Process(input *HookInput, patterns []matcher.Pattern, denyPatterns []matcher.Pattern, log *logfile.Logger) Result {
+func Process(input *HookInput, patterns []matcher.Pattern, askPatterns []matcher.Pattern, denyPatterns []matcher.Pattern, log *logfile.Logger) Result {
 	if input.ToolName != "Bash" {
 		return Result{Kind: ResultAsk, Reason: "not a Bash tool call"}
 	}
@@ -100,7 +100,7 @@ func Process(input *HookInput, patterns []matcher.Pattern, denyPatterns []matche
 	log.Log("parsed %d sub-command(s)", len(commands))
 
 	for _, cmd := range commands {
-		result, reason := checkCommand(cmd, patterns, denyPatterns, log)
+		result, reason := checkCommand(cmd, patterns, askPatterns, denyPatterns, log)
 		switch result {
 		case commandAllowed:
 			log.Log("  ok [%s]: %s", cmd.String(), reason)
@@ -139,7 +139,7 @@ const (
 )
 
 // checkCommand determines if a single command is allowed.
-func checkCommand(cmd parser.Command, patterns []matcher.Pattern, denyPatterns []matcher.Pattern, log *logfile.Logger) (commandResult, string) {
+func checkCommand(cmd parser.Command, patterns []matcher.Pattern, askPatterns []matcher.Pattern, denyPatterns []matcher.Pattern, log *logfile.Logger) (commandResult, string) {
 	// Dynamic command names — can't determine what runs.
 	if cmd.Dynamic {
 		return commandAsk, fmt.Sprintf("dynamic command name in %q", cmd.String())
@@ -148,9 +148,16 @@ func checkCommand(cmd parser.Command, patterns []matcher.Pattern, denyPatterns [
 	name := cmd.Name
 	cmdStr := strings.Join(cmd.Args, " ")
 
-	// Deny rules always win — check before anything else.
+	// Evaluation order: deny → ask → allow (first match wins).
+
+	// Deny rules always win.
 	if len(denyPatterns) > 0 && matcher.MatchesAny(cmdStr, denyPatterns) {
 		return commandDenied, fmt.Sprintf("denied by deny rule: %q", cmdStr)
+	}
+
+	// Ask rules override allow rules and safe builtins.
+	if len(askPatterns) > 0 && matcher.MatchesAny(cmdStr, askPatterns) {
+		return commandAsk, fmt.Sprintf("matched ask rule: %q", cmdStr)
 	}
 
 	// Check safety tier for builtins.

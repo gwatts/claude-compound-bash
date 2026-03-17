@@ -37,6 +37,12 @@ type Pattern struct {
 // Returns nil if the string is not a Bash(...) pattern.
 func ParsePattern(s string) *Pattern {
 	s = strings.TrimSpace(s)
+
+	// "Bash" without parens matches all Bash commands.
+	if s == "Bash" {
+		return &Pattern{Raw: s, MatchAll: true, FullGlob: "*"}
+	}
+
 	if !strings.HasPrefix(s, "Bash(") || !strings.HasSuffix(s, ")") {
 		return nil
 	}

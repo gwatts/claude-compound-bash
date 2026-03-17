@@ -26,7 +26,7 @@ func TestParsePattern(t *testing.T) {
 		{"Bash(go test *)", false, "", "", "go test *", false, false}, // no colon, has glob char → FullGlob
 		{"NotBash(foo)", true, "", "", "", false, false},
 		{"Bash()", true, "", "", "", false, false},
-		{"Bash", true, "", "", "", false, false},
+		{"Bash", false, "", "", "*", true, false},
 		{"", true, "", "", "", false, false},
 		{"Read(*)", true, "", "", "", false, false},
 	}
@@ -93,6 +93,26 @@ func TestPatternMatches(t *testing.T) {
 		// Glob matching details.
 		{"Bash(echo:?)", "echo a", true},
 		{"Bash(echo:?)", "echo ab", false},
+
+		// Wildcards at various positions (from Claude Code docs).
+		{"Bash(npm run *)", "npm run build", true},
+		{"Bash(npm run *)", "npm run test --watch", true},
+		{"Bash(npm run *)", "npm install", false},
+		{"Bash(* --version)", "node --version", true},
+		{"Bash(* --version)", "git --version", true},
+		{"Bash(* --version)", "git status", false},
+		{"Bash(git * main)", "git checkout main", true},
+		{"Bash(git * main)", "git merge main", true},
+		{"Bash(git * main)", "git checkout dev", false},
+
+		// Word boundary: "ls *" vs "ls*" (from Claude Code docs).
+		{"Bash(ls *)", "ls -la", true},
+		{"Bash(ls *)", "lsof", false}, // space before * enforces word boundary
+		{"Bash(ls*)", "ls -la", true},
+		{"Bash(ls*)", "lsof", true}, // no space, no word boundary
+
+		// Bare "Bash" without parens = match all.
+		{"Bash", "anything", true},
 	}
 
 	for _, tt := range tests {

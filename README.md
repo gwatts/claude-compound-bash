@@ -2,18 +2,22 @@
 
 A Claude Code [PreToolUse hook](https://code.claude.com/docs/en/hooks) plugin that auto-approves Bash tool calls when every sub-command matches your existing permission rules or is a known-safe command.
 
+See [anthropics/claude-code#16561](https://github.com/anthropics/claude-code/issues/16561) for the upstream feature request.
+
 ## The problem
 
 Claude Code checks each `Bash` tool call against your permission rules before executing. Single commands like `git status` match fine, but compound commands like `git add -A && git commit -m 'fix'` are treated as a single opaque string that doesn't match any individual rule -- so you get prompted every time.
 
 ## How it works
 
-The plugin registers a PreToolUse hook that intercepts every Bash tool call. It parses the command using [`mvdan.cc/sh/v3`](https://pkg.go.dev/mvdan.cc/sh/v3) (the parser behind `shfmt`), walks the full AST to extract every sub-command, and checks each one against your allow/deny patterns from `~/.claude/settings.json` and project-level settings.
+The plugin registers a PreToolUse hook that intercepts every Bash tool call. It parses the command using [`mvdan.cc/sh/v3`](https://pkg.go.dev/mvdan.cc/sh/v3) (the parser behind `shfmt`), walks the full AST to extract every sub-command, and checks each one against your allow/ask/deny patterns from settings files.
+
+Rules are evaluated in the same order as Claude Code: **deny → ask → allow**. The first matching rule wins.
 
 For each tool call, the hook returns one of three decisions:
 
 - **`allow`** -- every sub-command is either a known-safe command or matches an allow pattern. The command runs without prompting.
-- **`ask`** -- at least one sub-command isn't in the allow list. Claude Code shows its normal permission prompt.
+- **`ask`** -- at least one sub-command matches an ask pattern or isn't in the allow list. Claude Code shows its normal permission prompt.
 - **`deny`** -- a sub-command matches an explicit deny pattern. The tool call is cancelled outright and Claude receives feedback explaining why.
 
 ### What gets checked
@@ -80,44 +84,49 @@ Then add the hook to `~/.claude/settings.json`:
 
 ## Pattern format
 
-The hook reads allow and deny patterns from your Claude Code settings files:
+The hook reads allow, ask, and deny patterns from your Claude Code settings files:
 - `~/.claude/settings.json` and `~/.claude/settings.local.json`
 - `<project>/.claude/settings.json` and `<project>/.claude/settings.local.json`
 
-Patterns use the same `Bash(...)` format as Claude Code:
+Patterns use the same [`Bash(...)` format](https://code.claude.com/docs/en/permissions#wildcard-patterns) as Claude Code:
 
-| Pattern           | Matches                                  |
-| ----------------- | ---------------------------------------- |
-| `Bash(*)`         | Any command                              |
-| `Bash(git:*)`     | `git` with any arguments                 |
-| `Bash(git add:*)` | `git add` with any arguments             |
-| `Bash(jq)`        | Exactly `jq` with no arguments           |
-| `Bash(sed *)`     | `sed` followed by anything (glob format) |
+| Pattern              | Matches                                     |
+| -------------------- | ------------------------------------------- |
+| `Bash` or `Bash(*)` | Any command                                 |
+| `Bash(git *)`        | `git` with any arguments                    |
+| `Bash(git add *)`    | `git add` with any arguments                |
+| `Bash(jq)`           | Exactly `jq` with no arguments              |
+| `Bash(* --version)`  | Any command ending with `--version`          |
+| `Bash(git * main)`   | `git` commands with `main` at the end        |
+| `Bash(ls *)`         | `ls` with args (`ls -la` yes, `lsof` no)    |
+| `Bash(ls*)`          | Anything starting with `ls` (including `lsof`) |
 
-The colon-delimited form (`prefix:glob`) does literal prefix matching then globs the remainder. The no-colon form (`Bash(sed *)`) globs against the entire command string.
+The space before `*` matters for word boundaries: `Bash(ls *)` requires a space after `ls`, while `Bash(ls*)` does not.
+
+The legacy colon-delimited form (`Bash(git:*)`) is also supported.
 
 ## Logging
 
 The hook logs decisions to `~/.claude/logs/compound-bash.log` with version-tagged entries showing exactly which sub-commands were checked and why:
 
 ```
-2026-03-16T21:15:14-05:00 [0.9.8] loaded 3 allow, 0 deny patterns from [/home/user/.claude/settings.json]
-2026-03-16T21:15:14-05:00 [0.9.8] evaluating: git add -A && git commit -m "fix"
-2026-03-16T21:15:14-05:00 [0.9.8] parsed 2 sub-command(s)
-2026-03-16T21:15:14-05:00 [0.9.8]   ok [git add -A]: matched allow pattern for "git add -A"
-2026-03-16T21:15:14-05:00 [0.9.8]   ok [git commit -m "fix"]: matched allow pattern for "git commit -m fix"
-2026-03-16T21:15:14-05:00 [0.9.8] ALLOW: all 2 sub-command(s) matched
+2026-03-16T21:15:14-05:00 [0.9.9] loaded 3 allow, 0 ask, 1 deny patterns from [~/.claude/settings.json]
+2026-03-16T21:15:14-05:00 [0.9.9] evaluating: git add -A && git commit -m "fix"
+2026-03-16T21:15:14-05:00 [0.9.9] parsed 2 sub-command(s)
+2026-03-16T21:15:14-05:00 [0.9.9]   ok [git add -A]: matched allow pattern for "git add -A"
+2026-03-16T21:15:14-05:00 [0.9.9]   ok [git commit -m "fix"]: matched allow pattern for "git commit -m fix"
+2026-03-16T21:15:14-05:00 [0.9.9] ALLOW: all 2 sub-command(s) matched
 ```
 
 When a command can't be approved, the log shows exactly which sub-command was the problem:
 
 ```
-2026-03-16T21:15:14-05:00 [0.9.8] evaluating: echo "$(ls | wc -l | xargs)"
-2026-03-16T21:15:14-05:00 [0.9.8] parsed 4 sub-command(s)
-2026-03-16T21:15:14-05:00 [0.9.8]   ok [echo "$(ls | wc -l | xargs)"]: "echo" is inert builtin
-2026-03-16T21:15:14-05:00 [0.9.8]   ok [ls]: "ls" is always-inert builtin
-2026-03-16T21:15:14-05:00 [0.9.8]   ok [wc -l]: "wc" is always-inert builtin
-2026-03-16T21:15:14-05:00 [0.9.8] ASK [xargs]: not in allow list: "xargs"
+2026-03-16T21:15:14-05:00 [0.9.9] evaluating: echo "$(ls | wc -l | xargs)"
+2026-03-16T21:15:14-05:00 [0.9.9] parsed 4 sub-command(s)
+2026-03-16T21:15:14-05:00 [0.9.9]   ok [echo "$(ls | wc -l | xargs)"]: "echo" is inert builtin
+2026-03-16T21:15:14-05:00 [0.9.9]   ok [ls]: "ls" is always-inert builtin
+2026-03-16T21:15:14-05:00 [0.9.9]   ok [wc -l]: "wc" is always-inert builtin
+2026-03-16T21:15:14-05:00 [0.9.9] ASK [xargs]: not in allow list: "xargs"
 ```
 
 Set `CLAUDE_COMPOUND_LOG` to override the log path, or use `claude --debug` to see hook output in the transcript.

@@ -16,7 +16,7 @@ func BenchmarkProcessSimple(b *testing.B) {
 	log := logfile.NopLogger()
 
 	for b.Loop() {
-		Process(input, pats, nil, log)
+		Process(input, pats, nil, nil, log)
 	}
 }
 
@@ -29,7 +29,7 @@ func BenchmarkProcessCompound(b *testing.B) {
 	log := logfile.NopLogger()
 
 	for b.Loop() {
-		Process(input, pats, nil, log)
+		Process(input, pats, nil, nil, log)
 	}
 }
 
@@ -46,7 +46,7 @@ func BenchmarkProcessComplexPipeline(b *testing.B) {
 	log := logfile.NopLogger()
 
 	for b.Loop() {
-		Process(input, pats, nil, log)
+		Process(input, pats, nil, nil, log)
 	}
 }
 
@@ -59,6 +59,6 @@ func BenchmarkProcessWithSubstitution(b *testing.B) {
 	log := logfile.NopLogger()
 
 	for b.Loop() {
-		Process(input, pats, nil, log)
+		Process(input, pats, nil, nil, log)
 	}
 }
