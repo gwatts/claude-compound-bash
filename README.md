@@ -1,33 +1,46 @@
 # claude-compound-bash
 
-A Claude Code [PreToolUse hook](https://docs.anthropic.com/en/docs/claude-code/hooks) that auto-approves compound bash commands when every sub-command individually matches your allow rules.
+A Claude Code [PreToolUse hook](https://code.claude.com/docs/en/hooks) plugin that auto-approves Bash tool calls when every sub-command matches your existing permission rules or is a known-safe command.
 
 ## The problem
 
-Claude Code checks each `Bash` tool call against your permission rules before executing.
-Single commands like `git status` match fine, but compound commands like `git add -A && git commit -m 'fix'` are treated as a single opaque string that doesn't match any individual rule -- so you get prompted every time.
+Claude Code checks each `Bash` tool call against your permission rules before executing. Single commands like `git status` match fine, but compound commands like `git add -A && git commit -m 'fix'` are treated as a single opaque string that doesn't match any individual rule -- so you get prompted every time.
 
-## What this does
+## How it works
 
-Parses compound commands using [`mvdan.cc/sh/v3`](https://pkg.go.dev/mvdan.cc/sh/v3) (the parser behind `shfmt`), walks the full AST to extract every command that will execute, and checks each against your `~/.claude/settings.json` allow patterns.
+The plugin registers a PreToolUse hook that intercepts every Bash tool call. It parses the command using [`mvdan.cc/sh/v3`](https://pkg.go.dev/mvdan.cc/sh/v3) (the parser behind `shfmt`), walks the full AST to extract every sub-command, and checks each one against your allow/deny patterns from `~/.claude/settings.json` and project-level settings.
 
-**Key behaviors:**
+For each tool call, the hook returns one of three decisions:
 
-- **Fail closed** -- if the parser can't handle the input, it defers to Claude Code's normal approval flow. No fallback parser.
-- **Full AST walk** -- commands inside `$(...)`, `` `...` ``, `<(...)`, subshells, loops, if-branches, case statements, and function bodies are all extracted and checked.
-- **Three-tier builtin classification:**
-  - _Always inert_ (`true`, `false`, `test`, `[`, `[[`) -- auto-allowed regardless of arguments
-  - _Inert if literal_ (`echo`, `cd`, `printf`, `read`, etc.) -- auto-allowed only when arguments contain no command or process substitutions
-  - _Never auto-allow_ (`source`, `.`, `eval`, `exec`, `set`, `trap`, `builtin`) -- always require an explicit pattern match
-- **Dynamic command names denied** -- `$CMD args` cannot be statically resolved, so it's never auto-approved.
-- **Deny rules always win** -- reads `~/.claude/settings.json`, `~/.claude/settings.local.json`, and project-level `.claude/settings.json`/`.claude/settings.local.json`. Deny patterns from any scope block approval, matching Claude Code's own semantics.
-- **Safe logging** -- writes to `~/.claude/logs/compound-bash.log` with 0600 permissions in a 0700 directory.
+- **`allow`** -- every sub-command is either a known-safe command or matches an allow pattern. The command runs without prompting.
+- **`ask`** -- at least one sub-command isn't approved. Claude Code shows its normal permission prompt.
+- The hook never returns `deny` -- if it can't approve a command, it always defers to you.
 
-## What this does NOT do
+### What gets checked
 
-- **It doesn't bypass Claude Code's permission system.** It only auto-approves commands that you've already allowed individually. If `curl` isn't in your allow list, `git status && curl evil.com` still prompts.
-- **It doesn't handle non-Bash tools.** It ignores `Read`, `Write`, `Edit`, etc.
-- **It doesn't auto-deny.** When it can't approve a command, it defers to Claude Code's normal flow rather than blocking outright. You'll see a system message noting which sub-command wasn't matched.
+**Full AST walk** -- commands inside `$(...)`, `` `...` ``, `<(...)`, subshells, loops, if-branches, case statements, heredocs, and function bodies are all extracted and checked individually.
+
+For example, `echo "there are $(ls | wc -l) files"` is parsed into three sub-commands: `echo` (safe builtin), `ls` (safe read-only command), and `wc` (safe read-only command). Each is checked independently.
+
+**Dynamic command names rejected** -- `$CMD args` cannot be statically resolved, so it always defers to the prompt.
+
+**Deny rules always win** -- deny patterns from any scope (user or project settings) block approval, matching Claude Code's own semantics.
+
+### Command safety tiers
+
+Commands are classified into tiers to minimize how many explicit allow rules you need:
+
+**Always safe** -- auto-approved regardless of arguments. These are read-only commands that cannot cause side effects:
+- Shell builtins: `true`, `false`, `:`, `test`, `[`, `[[`
+- Read-only commands: `ls`, `cat`, `head`, `tail`, `wc`, `sort`, `uniq`, `date`, `whoami`, `basename`, `dirname`, `realpath`, `readlink`, `which`, `file`, `stat`, `uname`, `id`, `hostname`, `tr`, `cut`, `rev`, `seq`, `diff`, `comm`, `printenv`
+
+**Safe builtins** -- shell builtins that are auto-approved because any commands embedded in their arguments via `$(...)` or `<(...)` are extracted and checked separately:
+- `echo`, `printf`, `cd`, `pwd`, `exit`, `return`, `shift`, `unset`, `read`, `pushd`, `popd`, `dirs`, `hash`, `type`, `umask`, `wait`, `times`, `ulimit`, `break`, `continue`, `getopts`
+
+**Require explicit allow pattern** -- these can execute arbitrary code or mutate shell behavior:
+- `source`, `.`, `eval`, `exec`, `set`, `trap`, `builtin`, `alias`, `unalias`, `let`
+
+**Everything else** (external commands like `git`, `npm`, `curl`, `sed`, etc.) requires a matching allow pattern in your settings.
 
 ## Install
 
@@ -67,6 +80,10 @@ Then add the hook to `~/.claude/settings.json`:
 
 ## Pattern format
 
+The hook reads allow and deny patterns from your Claude Code settings files:
+- `~/.claude/settings.json` and `~/.claude/settings.local.json`
+- `<project>/.claude/settings.json` and `<project>/.claude/settings.local.json`
+
 Patterns use the same `Bash(...)` format as Claude Code:
 
 | Pattern           | Matches                                  |
@@ -78,3 +95,37 @@ Patterns use the same `Bash(...)` format as Claude Code:
 | `Bash(sed *)`     | `sed` followed by anything (glob format) |
 
 The colon-delimited form (`prefix:glob`) does literal prefix matching then globs the remainder. The no-colon form (`Bash(sed *)`) globs against the entire command string.
+
+## Logging
+
+The hook logs decisions to `~/.claude/logs/compound-bash.log` with version-tagged entries showing exactly which sub-commands were checked and why:
+
+```
+2026-03-16T21:15:14-05:00 [0.9.8] loaded 3 allow, 0 deny patterns from [/home/user/.claude/settings.json]
+2026-03-16T21:15:14-05:00 [0.9.8] evaluating: git add -A && git commit -m "fix"
+2026-03-16T21:15:14-05:00 [0.9.8] parsed 2 sub-command(s)
+2026-03-16T21:15:14-05:00 [0.9.8]   ok [git add -A]: matched allow pattern for "git add -A"
+2026-03-16T21:15:14-05:00 [0.9.8]   ok [git commit -m "fix"]: matched allow pattern for "git commit -m fix"
+2026-03-16T21:15:14-05:00 [0.9.8] ALLOW: all 2 sub-command(s) matched
+```
+
+When a command can't be approved, the log shows exactly which sub-command was the problem:
+
+```
+2026-03-16T21:15:14-05:00 [0.9.8] evaluating: echo "$(ls | wc -l | xargs)"
+2026-03-16T21:15:14-05:00 [0.9.8] parsed 4 sub-command(s)
+2026-03-16T21:15:14-05:00 [0.9.8]   ok [echo "$(ls | wc -l | xargs)"]: "echo" is inert builtin
+2026-03-16T21:15:14-05:00 [0.9.8]   ok [ls]: "ls" is always-inert builtin
+2026-03-16T21:15:14-05:00 [0.9.8]   ok [wc -l]: "wc" is always-inert builtin
+2026-03-16T21:15:14-05:00 [0.9.8] ASK [xargs]: not in allow list: "xargs"
+```
+
+Set `CLAUDE_COMPOUND_LOG` to override the log path, or use `claude --debug` to see hook output in the transcript.
+
+## Troubleshooting
+
+**Hook not firing**: Run `/hooks` in Claude Code to confirm the hook is registered. Check `~/.claude/logs/compound-bash.log` for output.
+
+**Commands not auto-approving**: Check the log to see which sub-command isn't matched. Add the appropriate `Bash(...)` pattern to your settings, or check that your settings file is being found (the log shows which files were loaded).
+
+**"no allow patterns configured"**: The hook couldn't find any allow patterns in your settings files. Check that `permissions.allow` exists in `~/.claude/settings.json` or project settings.
