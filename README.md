@@ -36,7 +36,7 @@ Commands are classified into tiers to minimize how many explicit allow rules you
 
 **Always safe** -- auto-approved regardless of arguments. These are read-only commands that cannot cause side effects:
 - Shell builtins: `true`, `false`, `:`, `test`, `[`, `[[`
-- Read-only commands: `ls`, `cat`, `head`, `tail`, `wc`, `sort`, `uniq`, `date`, `whoami`, `basename`, `dirname`, `realpath`, `readlink`, `which`, `file`, `stat`, `uname`, `id`, `hostname`, `tr`, `cut`, `rev`, `seq`, `sleep`, `diff`, `comm`, `printenv`
+- Read-only commands: `ls`, `cat`, `head`, `tail`, `wc`, `uniq`, `date`, `whoami`, `basename`, `dirname`, `realpath`, `readlink`, `which`, `file`, `stat`, `uname`, `id`, `hostname`, `tr`, `cut`, `rev`, `seq`, `sleep`, `diff`, `comm`, `printenv`
 
 **Safe builtins** -- shell builtins that are auto-approved because any commands embedded in their arguments via `$(...)` or `<(...)` are extracted and checked separately:
 - `echo`, `printf`, `cd`, `pwd`, `exit`, `return`, `shift`, `unset`, `read`, `pushd`, `popd`, `dirs`, `hash`, `type`, `umask`, `wait`, `times`, `ulimit`, `break`, `continue`, `getopts`

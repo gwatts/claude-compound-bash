@@ -22,8 +22,9 @@ func TestLoadPermissionsWithProjectDir(t *testing.T) {
   }
 }`
 	require.NoError(t, os.WriteFile(filepath.Join(claudeDir, "settings.json"), []byte(content), 0600))
+	t.Setenv("CLAUDE_PROJECT_DIR", projectDir)
 
-	perms, err := LoadPermissions(projectDir)
+	perms, err := LoadPermissions()
 	require.NoError(t, err)
 
 	// Should include project allow patterns (plus any from user home, which may or may not exist).
@@ -31,9 +32,11 @@ func TestLoadPermissionsWithProjectDir(t *testing.T) {
 	assert.Contains(t, perms.Deny, "Bash(npm publish:*)")
 }
 
-func TestLoadPermissionsEmptyCwd(t *testing.T) {
-	// With empty cwd, should still load user settings without error.
-	perms, err := LoadPermissions("")
+func TestLoadPermissionsNoProjectDir(t *testing.T) {
+	// With no project dir set, should still load user settings without error.
+	t.Setenv("CLAUDE_PROJECT_DIR", "")
+
+	perms, err := LoadPermissions()
 	require.NoError(t, err)
 	assert.NotNil(t, perms)
 }
@@ -47,8 +50,9 @@ func TestLoadPermissionsMergesMultipleFiles(t *testing.T) {
 	settingsLocal := `{"permissions": {"allow": ["Bash(go:*)"], "deny": ["Bash(rm:*)"]}}`
 	require.NoError(t, os.WriteFile(filepath.Join(claudeDir, "settings.json"), []byte(settings), 0600))
 	require.NoError(t, os.WriteFile(filepath.Join(claudeDir, "settings.local.json"), []byte(settingsLocal), 0600))
+	t.Setenv("CLAUDE_PROJECT_DIR", projectDir)
 
-	perms, err := LoadPermissions(projectDir)
+	perms, err := LoadPermissions()
 	require.NoError(t, err)
 
 	assert.Contains(t, perms.Allow, "Bash(git:*)")
@@ -62,8 +66,9 @@ func TestLoadPermissionsNoPermissionsKey(t *testing.T) {
 	require.NoError(t, os.MkdirAll(claudeDir, 0700))
 
 	require.NoError(t, os.WriteFile(filepath.Join(claudeDir, "settings.json"), []byte(`{}`), 0600))
+	t.Setenv("CLAUDE_PROJECT_DIR", projectDir)
 
-	perms, err := LoadPermissions(projectDir)
+	perms, err := LoadPermissions()
 	require.NoError(t, err)
 	assert.NotNil(t, perms)
 }
@@ -74,9 +79,10 @@ func TestLoadPermissionsInvalidJSON(t *testing.T) {
 	require.NoError(t, os.MkdirAll(claudeDir, 0700))
 
 	require.NoError(t, os.WriteFile(filepath.Join(claudeDir, "settings.json"), []byte(`{invalid`), 0600))
+	t.Setenv("CLAUDE_PROJECT_DIR", projectDir)
 
 	// Should not error — invalid files are skipped.
-	perms, err := LoadPermissions(projectDir)
+	perms, err := LoadPermissions()
 	require.NoError(t, err)
 	assert.NotNil(t, perms)
 }

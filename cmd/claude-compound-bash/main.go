@@ -80,7 +80,7 @@ func run() error {
 	}
 
 	// Load allow/deny patterns from user and project settings.
-	perms, err := settings.LoadPermissions(input.Cwd)
+	perms, err := settings.LoadPermissions()
 	if err != nil {
 		log.Log("failed to load settings: %v", err)
 		perms = &settings.ResolvedPermissions{}

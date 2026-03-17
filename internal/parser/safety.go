@@ -35,7 +35,6 @@ var alwaysInert = map[string]bool{
 	"head":     true,
 	"tail":     true,
 	"wc":       true,
-	"sort":     true,
 	"uniq":     true,
 	"basename": true,
 	"dirname":  true,

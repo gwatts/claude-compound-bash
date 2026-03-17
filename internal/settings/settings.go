@@ -33,12 +33,11 @@ type ResolvedPermissions struct {
 //   - ~/.claude/settings.local.json
 //   - <projectDir>/.claude/settings.json      (if set)
 //   - <projectDir>/.claude/settings.local.json (if set)
-//   - <cwd>/.claude/settings.json              (if different from projectDir)
-//   - <cwd>/.claude/settings.local.json        (if different from projectDir)
 //
 // projectDir is read from the CLAUDE_PROJECT_DIR environment variable.
+// Project-level settings override user-level settings.
 // Deny rules from any scope block approval.
-func LoadPermissions(cwd string) (*ResolvedPermissions, error) {
+func LoadPermissions() (*ResolvedPermissions, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, err
@@ -55,13 +54,6 @@ func LoadPermissions(cwd string) (*ResolvedPermissions, error) {
 		files = append(files,
 			filepath.Join(projectDir, ".claude", "settings.json"),
 			filepath.Join(projectDir, ".claude", "settings.local.json"),
-		)
-	}
-
-	if cwd != "" && cwd != projectDir {
-		files = append(files,
-			filepath.Join(cwd, ".claude", "settings.json"),
-			filepath.Join(cwd, ".claude", "settings.local.json"),
 		)
 	}
 
