@@ -42,12 +42,16 @@ type HookSpecific struct {
 type ResultKind int
 
 const (
-	// ResultDenied means one or more commands were not approved.
-	ResultDenied ResultKind = iota
+	// ResultAsk means one or more commands were not in the allow list.
+	// Defers to Claude Code's normal permission prompt.
+	ResultAsk ResultKind = iota
 	// ResultAllowed means all commands matched allow rules or were inert.
 	ResultAllowed
 	// ResultParseError means the command could not be parsed.
 	ResultParseError
+	// ResultDenyRule means a command matched an explicit deny pattern.
+	// The tool call is cancelled outright.
+	ResultDenyRule
 )
 
 // Result represents the outcome of processing a hook event.
@@ -65,12 +69,12 @@ type Result struct {
 // to Claude Code). This matches Claude Code's own "deny always wins" semantics.
 func Process(input *HookInput, patterns []matcher.Pattern, denyPatterns []matcher.Pattern, log *logfile.Logger) Result {
 	if input.ToolName != "Bash" {
-		return Result{Kind: ResultDenied, Reason: "not a Bash tool call"}
+		return Result{Kind: ResultAsk, Reason: "not a Bash tool call"}
 	}
 
 	command := input.ToolInput.Command
 	if command == "" {
-		return Result{Kind: ResultDenied, Reason: "empty command"}
+		return Result{Kind: ResultAsk, Reason: "empty command"}
 	}
 
 	log.Log("evaluating: %s", truncate(command, 200))
@@ -96,16 +100,25 @@ func Process(input *HookInput, patterns []matcher.Pattern, denyPatterns []matche
 	log.Log("parsed %d sub-command(s)", len(commands))
 
 	for _, cmd := range commands {
-		allowed, reason := checkCommand(cmd, patterns, denyPatterns, log)
-		if !allowed {
+		result, reason := checkCommand(cmd, patterns, denyPatterns, log)
+		switch result {
+		case commandAllowed:
+			log.Log("  ok [%s]: %s", cmd.String(), reason)
+		case commandDenied:
+			log.Log("DENY [%s]: %s", cmd.String(), reason)
+			return Result{
+				Kind:           ResultDenyRule,
+				Reason:         reason,
+				BlockedCommand: cmd.String(),
+			}
+		default:
 			log.Log("ASK [%s]: %s", cmd.String(), reason)
 			return Result{
-				Kind:           ResultDenied,
+				Kind:           ResultAsk,
 				Reason:         reason,
 				BlockedCommand: cmd.String(),
 			}
 		}
-		log.Log("  ok [%s]: %s", cmd.String(), reason)
 	}
 
 	reason := fmt.Sprintf("all %d sub-command(s) matched", len(commands))
@@ -116,11 +129,20 @@ func Process(input *HookInput, patterns []matcher.Pattern, denyPatterns []matche
 	}
 }
 
+// commandResult represents the outcome of checking a single command.
+type commandResult int
+
+const (
+	commandAllowed commandResult = iota
+	commandAsk                   // not in allow list
+	commandDenied                // matched deny rule
+)
+
 // checkCommand determines if a single command is allowed.
-func checkCommand(cmd parser.Command, patterns []matcher.Pattern, denyPatterns []matcher.Pattern, log *logfile.Logger) (bool, string) {
+func checkCommand(cmd parser.Command, patterns []matcher.Pattern, denyPatterns []matcher.Pattern, log *logfile.Logger) (commandResult, string) {
 	// Dynamic command names — can't determine what runs.
 	if cmd.Dynamic {
-		return false, fmt.Sprintf("dynamic command name in %q", cmd.String())
+		return commandAsk, fmt.Sprintf("dynamic command name in %q", cmd.String())
 	}
 
 	name := cmd.Name
@@ -128,20 +150,20 @@ func checkCommand(cmd parser.Command, patterns []matcher.Pattern, denyPatterns [
 
 	// Deny rules always win — check before anything else.
 	if len(denyPatterns) > 0 && matcher.MatchesAny(cmdStr, denyPatterns) {
-		return false, fmt.Sprintf("denied by deny rule: %q", cmdStr)
+		return commandDenied, fmt.Sprintf("denied by deny rule: %q", cmdStr)
 	}
 
 	// Check safety tier for builtins.
 	tier := parser.ClassifyBuiltin(name)
 	switch tier {
 	case parser.TierAlwaysInert:
-		return true, fmt.Sprintf("%q is always-inert builtin", name)
+		return commandAllowed, fmt.Sprintf("%q is always-inert builtin", name)
 
 	case parser.TierInertIfLiteral:
 		// Inert builtins (echo, cd, pwd, etc.) are safe regardless of argument
 		// literalness. Any commands embedded via $(...) or <(...) are extracted
 		// by the AST walker and checked as separate entries.
-		return true, fmt.Sprintf("%q is inert builtin", name)
+		return commandAllowed, fmt.Sprintf("%q is inert builtin", name)
 
 	case parser.TierNeverAllow:
 		// source, eval, exec, etc. — never auto-allow, must match a pattern.
@@ -150,10 +172,10 @@ func checkCommand(cmd parser.Command, patterns []matcher.Pattern, denyPatterns [
 
 	// Check against allow patterns.
 	if matcher.MatchesAny(cmdStr, patterns) {
-		return true, fmt.Sprintf("matched allow pattern for %q", cmdStr)
+		return commandAllowed, fmt.Sprintf("matched allow pattern for %q", cmdStr)
 	}
 
-	return false, fmt.Sprintf("not in allow list: %q", cmdStr)
+	return commandAsk, fmt.Sprintf("not in allow list: %q", cmdStr)
 }
 
 // MarshalAllow produces the JSON output for an allow decision.
@@ -162,6 +184,19 @@ func MarshalAllow(reason string) ([]byte, error) {
 		HookSpecificOutput: &HookSpecific{
 			HookEventName:            "PreToolUse",
 			PermissionDecision:       "allow",
+			PermissionDecisionReason: reason,
+		},
+	}
+	return json.Marshal(out)
+}
+
+// MarshalDeny produces the JSON output that cancels the tool call.
+// Used when a command matches an explicit deny pattern.
+func MarshalDeny(reason string) ([]byte, error) {
+	out := HookOutput{
+		HookSpecificOutput: &HookSpecific{
+			HookEventName:            "PreToolUse",
+			PermissionDecision:       "deny",
 			PermissionDecisionReason: reason,
 		},
 	}

@@ -100,6 +100,8 @@ func run() error {
 	switch result.Kind {
 	case hook.ResultAllowed:
 		output, err = hook.MarshalAllow(result.Reason)
+	case hook.ResultDenyRule:
+		output, err = hook.MarshalDeny(result.Reason)
 	default:
 		output, err = hook.MarshalAsk(result.Reason)
 	}

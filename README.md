@@ -13,8 +13,8 @@ The plugin registers a PreToolUse hook that intercepts every Bash tool call. It 
 For each tool call, the hook returns one of three decisions:
 
 - **`allow`** -- every sub-command is either a known-safe command or matches an allow pattern. The command runs without prompting.
-- **`ask`** -- at least one sub-command isn't approved. Claude Code shows its normal permission prompt.
-- The hook never returns `deny` -- if it can't approve a command, it always defers to you.
+- **`ask`** -- at least one sub-command isn't in the allow list. Claude Code shows its normal permission prompt.
+- **`deny`** -- a sub-command matches an explicit deny pattern. The tool call is cancelled outright and Claude receives feedback explaining why.
 
 ### What gets checked
 
