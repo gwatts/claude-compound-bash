@@ -112,7 +112,7 @@ func TestProcessInertBuiltins(t *testing.T) {
 		{"echo hello world", ResultAllowed},
 		{"cd /tmp", ResultAllowed},
 		{"pwd", ResultAllowed},
-		{"echo $(rm -rf /)", ResultDenied}, // command subst in echo args
+		{"echo $(rm -rf /)", ResultDenied}, // echo is inert, but rm inside $() is extracted and denied
 	}
 
 	for _, tt := range tests {

@@ -88,7 +88,9 @@ func run() error {
 
 	allowPatterns := matcher.ParsePatterns(perms.Allow)
 	denyPatterns := matcher.ParsePatterns(perms.Deny)
+	log.Log("loaded %d allow, %d deny patterns", len(allowPatterns), len(denyPatterns))
 	if len(allowPatterns) == 0 {
+		log.Log("ASK: no allow patterns configured")
 		return writeAsk(os.Stdout, "no allow patterns configured")
 	}
 

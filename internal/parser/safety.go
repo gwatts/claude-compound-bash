@@ -20,14 +20,21 @@ const (
 	TierNotBuiltin
 )
 
-// alwaysInert cannot execute external code regardless of arguments.
+// alwaysInert are read-only commands that cannot cause side effects
+// regardless of arguments. Includes both shell builtins and common
+// external commands that only read/display information.
 var alwaysInert = map[string]bool{
+	// Shell builtins
 	"true":  true,
 	"false": true,
 	":":     true,
 	"test":  true,
 	"[":     true,
 	"[[":    true,
+	// Read-only external commands
+	"ls":     true,
+	"date":   true,
+	"whoami": true,
 }
 
 // inertIfLiteral are safe only when their arguments contain no command/process substitutions.

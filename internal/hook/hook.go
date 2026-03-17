@@ -86,29 +86,30 @@ func Process(input *HookInput, patterns []matcher.Pattern, denyPatterns []matche
 	}
 
 	if len(commands) == 0 {
-		// Pure assignments or empty — allow.
-		log.Log("no executable commands found, allowing")
+		log.Log("ALLOW: no executable commands (pure assignment or empty)")
 		return Result{
 			Kind:   ResultAllowed,
 			Reason: "no executable commands",
 		}
 	}
 
+	log.Log("parsed %d sub-command(s)", len(commands))
+
 	for _, cmd := range commands {
 		allowed, reason := checkCommand(cmd, patterns, denyPatterns, log)
 		if !allowed {
-			log.Log("DENIED %q: %s", cmd.String(), reason)
+			log.Log("ASK [%s]: %s", cmd.String(), reason)
 			return Result{
 				Kind:           ResultDenied,
 				Reason:         reason,
 				BlockedCommand: cmd.String(),
 			}
 		}
-		log.Log("allowed %q: %s", cmd.String(), reason)
+		log.Log("  ok [%s]: %s", cmd.String(), reason)
 	}
 
-	reason := fmt.Sprintf("all %d commands matched allow rules", len(commands))
-	log.Log("APPROVED: %s", reason)
+	reason := fmt.Sprintf("all %d sub-command(s) matched", len(commands))
+	log.Log("ALLOW: %s", reason)
 	return Result{
 		Kind:   ResultAllowed,
 		Reason: reason,
@@ -137,18 +138,10 @@ func checkCommand(cmd parser.Command, patterns []matcher.Pattern, denyPatterns [
 		return true, fmt.Sprintf("%q is always-inert builtin", name)
 
 	case parser.TierInertIfLiteral:
-		// Check if the arguments are free of command/process substitutions.
-		// We re-parse just this command to check argument literalness.
-		literal, err := parser.ArgsAreLiteral(cmd.Raw)
-		if err != nil {
-			// Can't parse — be conservative.
-			return false, fmt.Sprintf("could not check args for %q: %v", name, err)
-		}
-		if literal {
-			return true, fmt.Sprintf("%q with literal args is inert builtin", name)
-		}
-		// Args contain substitutions — fall through to pattern matching.
-		log.Log("%q has non-literal args, checking patterns", name)
+		// Inert builtins (echo, cd, pwd, etc.) are safe regardless of argument
+		// literalness. Any commands embedded via $(...) or <(...) are extracted
+		// by the AST walker and checked as separate entries.
+		return true, fmt.Sprintf("%q is inert builtin", name)
 
 	case parser.TierNeverAllow:
 		// source, eval, exec, etc. — never auto-allow, must match a pattern.
