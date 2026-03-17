@@ -20,19 +20,22 @@ type permissions struct {
 
 // ResolvedPermissions holds merged allow/deny patterns ready for use by the hook.
 type ResolvedPermissions struct {
-	Allow []string
-	Deny  []string
+	Allow   []string
+	Deny    []string
+	Sources []string // settings files that contributed patterns
 }
 
 // LoadPermissions reads allow and deny patterns from the user's global Claude
 // Code settings and (optionally) from project-level settings. It reads from:
 //   - ~/.claude/settings.json
 //   - ~/.claude/settings.local.json
-//   - <cwd>/.claude/settings.json      (if cwd is non-empty)
-//   - <cwd>/.claude/settings.local.json (if cwd is non-empty)
+//   - <projectDir>/.claude/settings.json      (if set)
+//   - <projectDir>/.claude/settings.local.json (if set)
+//   - <cwd>/.claude/settings.json              (if different from projectDir)
+//   - <cwd>/.claude/settings.local.json        (if different from projectDir)
 //
-// This matches Claude Code's own behavior: project-level settings are
-// auto-trusted. Deny rules from any scope block approval.
+// projectDir is read from the CLAUDE_PROJECT_DIR environment variable.
+// Deny rules from any scope block approval.
 func LoadPermissions(cwd string) (*ResolvedPermissions, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -45,7 +48,15 @@ func LoadPermissions(cwd string) (*ResolvedPermissions, error) {
 		filepath.Join(claudeDir, "settings.local.json"),
 	}
 
-	if cwd != "" {
+	projectDir := os.Getenv("CLAUDE_PROJECT_DIR")
+	if projectDir != "" {
+		files = append(files,
+			filepath.Join(projectDir, ".claude", "settings.json"),
+			filepath.Join(projectDir, ".claude", "settings.local.json"),
+		)
+	}
+
+	if cwd != "" && cwd != projectDir {
 		files = append(files,
 			filepath.Join(cwd, ".claude", "settings.json"),
 			filepath.Join(cwd, ".claude", "settings.local.json"),
@@ -58,8 +69,11 @@ func LoadPermissions(cwd string) (*ResolvedPermissions, error) {
 		if err != nil {
 			continue
 		}
-		result.Allow = append(result.Allow, perms.Allow...)
-		result.Deny = append(result.Deny, perms.Deny...)
+		if len(perms.Allow) > 0 || len(perms.Deny) > 0 {
+			result.Allow = append(result.Allow, perms.Allow...)
+			result.Deny = append(result.Deny, perms.Deny...)
+			result.Sources = append(result.Sources, path)
+		}
 	}
 
 	return result, nil
