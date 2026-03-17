@@ -61,6 +61,7 @@ func run() error {
 		log = logfile.NopLogger()
 	}
 	defer func() { _ = log.Close() }()
+	log.SetPrefix(version)
 
 	data, err := io.ReadAll(os.Stdin)
 	if err != nil {

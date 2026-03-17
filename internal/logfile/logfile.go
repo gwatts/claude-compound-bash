@@ -11,8 +11,9 @@ import (
 
 // Logger writes timestamped log entries to a file with safe permissions.
 type Logger struct {
-	mu   sync.Mutex
-	file *os.File
+	mu     sync.Mutex
+	file   *os.File
+	prefix string
 }
 
 // defaultPath returns the default log file path under ~/.claude/logs/.
@@ -52,6 +53,13 @@ func Open(path string) (*Logger, error) {
 	return &Logger{file: f}, nil
 }
 
+// SetPrefix sets a prefix that is included in every log line after the timestamp.
+func (l *Logger) SetPrefix(prefix string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.prefix = prefix
+}
+
 // Log writes a timestamped entry to the log file.
 func (l *Logger) Log(format string, args ...any) {
 	l.mu.Lock()
@@ -62,7 +70,11 @@ func (l *Logger) Log(format string, args ...any) {
 	}
 	msg := fmt.Sprintf(format, args...)
 	ts := time.Now().Format(time.RFC3339)
-	_, _ = fmt.Fprintf(l.file, "%s %s\n", ts, msg)
+	if l.prefix != "" {
+		_, _ = fmt.Fprintf(l.file, "%s [%s] %s\n", ts, l.prefix, msg)
+	} else {
+		_, _ = fmt.Fprintf(l.file, "%s %s\n", ts, msg)
+	}
 }
 
 // Close closes the log file.
