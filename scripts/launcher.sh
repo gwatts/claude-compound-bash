@@ -134,13 +134,14 @@ if [[ "${1:-}" == "--install" ]]; then
 fi
 
 # Normal operation: ensure binary exists, then exec it.
-if ! ensure_binary 2>&1 | head -5 >&2; then
+if ! ensure_binary 2>&1 | tail -5 >&2; then
     # Download failed — try the binary on PATH (supports go install users).
     if command -v "${BINARY_NAME}" >/dev/null 2>&1; then
         exec "${BINARY_NAME}" "$@"
     fi
-    # No binary available at all — exit silently so Claude Code falls through
-    # to its normal approval prompt.
+    # No binary available — output ask so Claude Code shows its normal
+    # permission prompt rather than silently approving.
+    echo '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"compound-bash binary not available"}}'
     exit 0
 fi
 

@@ -1,4 +1,4 @@
-// Package settings reads allow/deny patterns from Claude Code settings files.
+// Package settings reads allow/ask/deny patterns from Claude Code settings files.
 package settings
 
 import (

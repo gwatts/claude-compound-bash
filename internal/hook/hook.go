@@ -64,10 +64,9 @@ type Result struct {
 	BlockedCommand string
 }
 
-// Process evaluates a hook input against the given allow and deny patterns.
-// If any sub-command matches a deny pattern, the result is not allowed (defers
-// to Claude Code). This matches Claude Code's own "deny always wins" semantics.
-func Process(input *HookInput, patterns []matcher.Pattern, askPatterns []matcher.Pattern, denyPatterns []matcher.Pattern, log *logfile.Logger) Result {
+// Process evaluates a hook input against the given allow, ask, and deny patterns.
+// Evaluation order matches Claude Code: deny → ask → allow (first match wins).
+func Process(input *HookInput, allowPatterns []matcher.Pattern, askPatterns []matcher.Pattern, denyPatterns []matcher.Pattern, log *logfile.Logger) Result {
 	if input.ToolName != "Bash" {
 		return Result{Kind: ResultAsk, Reason: "not a Bash tool call"}
 	}
@@ -100,7 +99,7 @@ func Process(input *HookInput, patterns []matcher.Pattern, askPatterns []matcher
 	log.Log("parsed %d sub-command(s)", len(commands))
 
 	for _, cmd := range commands {
-		result, reason := checkCommand(cmd, patterns, askPatterns, denyPatterns, log)
+		result, reason := checkCommand(cmd, allowPatterns, askPatterns, denyPatterns, log)
 		switch result {
 		case commandAllowed:
 			log.Log("  ok [%s]: %s", cmd.String(), reason)
@@ -139,7 +138,7 @@ const (
 )
 
 // checkCommand determines if a single command is allowed.
-func checkCommand(cmd parser.Command, patterns []matcher.Pattern, askPatterns []matcher.Pattern, denyPatterns []matcher.Pattern, log *logfile.Logger) (commandResult, string) {
+func checkCommand(cmd parser.Command, allowPatterns []matcher.Pattern, askPatterns []matcher.Pattern, denyPatterns []matcher.Pattern, log *logfile.Logger) (commandResult, string) {
 	// Dynamic command names — can't determine what runs.
 	if cmd.Dynamic {
 		return commandAsk, fmt.Sprintf("dynamic command name in %q", cmd.String())
@@ -166,11 +165,8 @@ func checkCommand(cmd parser.Command, patterns []matcher.Pattern, askPatterns []
 	case parser.TierAlwaysInert:
 		return commandAllowed, fmt.Sprintf("%q is always-inert builtin", name)
 
-	case parser.TierInertIfLiteral:
-		// Inert builtins (echo, cd, pwd, etc.) are safe regardless of argument
-		// literalness. Any commands embedded via $(...) or <(...) are extracted
-		// by the AST walker and checked as separate entries.
-		return commandAllowed, fmt.Sprintf("%q is inert builtin", name)
+	case parser.TierSafeBuiltin:
+		return commandAllowed, fmt.Sprintf("%q is safe builtin", name)
 
 	case parser.TierNeverAllow:
 		// source, eval, exec, etc. — never auto-allow, must match a pattern.
@@ -178,7 +174,7 @@ func checkCommand(cmd parser.Command, patterns []matcher.Pattern, askPatterns []
 	}
 
 	// Check against allow patterns.
-	if matcher.MatchesAny(cmdStr, patterns) {
+	if matcher.MatchesAny(cmdStr, allowPatterns) {
 		return commandAllowed, fmt.Sprintf("matched allow pattern for %q", cmdStr)
 	}
 
