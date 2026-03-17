@@ -51,6 +51,7 @@ var alwaysInert = map[string]bool{
 	"cut":      true,
 	"rev":      true,
 	"seq":      true,
+	"sleep":    true,
 	"diff":     true,
 	"comm":     true,
 	"printenv": true,

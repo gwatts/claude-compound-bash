@@ -22,6 +22,7 @@ func TestClassifyBuiltin(t *testing.T) {
 		{"whoami", TierAlwaysInert},
 		{"cat", TierAlwaysInert},
 		{"wc", TierAlwaysInert},
+		{"sleep", TierAlwaysInert},
 		{"echo", TierSafeBuiltin},
 		{"printf", TierSafeBuiltin},
 		{"cd", TierSafeBuiltin},
