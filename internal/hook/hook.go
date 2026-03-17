@@ -29,8 +29,6 @@ type ToolInput struct {
 type HookOutput struct {
 	// HookSpecificOutput is set when we make a permission decision.
 	HookSpecificOutput *HookSpecific `json:"hookSpecificOutput,omitempty"`
-	// SystemMessage is set when we want to add context but not decide.
-	SystemMessage string `json:"systemMessage,omitempty"`
 }
 
 // HookSpecific contains the permission decision.
@@ -177,22 +175,15 @@ func MarshalAllow(reason string) ([]byte, error) {
 	return json.Marshal(out)
 }
 
-// MarshalDeny produces the JSON output for a deny (defer) decision.
-func MarshalDeny(blockedCmd string, reason string) ([]byte, error) {
-	msg := "[compound-bash] " + reason
-	if blockedCmd != "" {
-		msg = fmt.Sprintf("[compound-bash] blocked '%s': %s", blockedCmd, reason)
-	}
+// MarshalAsk produces the JSON output that defers to Claude Code's normal
+// permission prompt. Used when the hook can't approve a command.
+func MarshalAsk(reason string) ([]byte, error) {
 	out := HookOutput{
-		SystemMessage: msg,
-	}
-	return json.Marshal(out)
-}
-
-// MarshalParseError produces the JSON output for a parse failure.
-func MarshalParseError() ([]byte, error) {
-	out := HookOutput{
-		SystemMessage: "[compound-bash] could not parse command, deferring to manual approval",
+		HookSpecificOutput: &HookSpecific{
+			HookEventName:            "PreToolUse",
+			PermissionDecision:       "ask",
+			PermissionDecisionReason: reason,
+		},
 	}
 	return json.Marshal(out)
 }

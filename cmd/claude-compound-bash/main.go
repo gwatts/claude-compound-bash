@@ -69,19 +69,13 @@ func run() error {
 
 	var input hook.HookInput
 	if err := json.Unmarshal(data, &input); err != nil {
-		// Can't parse hook input — defer to manual approval.
 		log.Log("invalid hook input: %v", err)
-		output, mErr := hook.MarshalParseError()
-		if mErr != nil {
-			return fmt.Errorf("marshal parse-error output: %w", mErr)
-		}
-		_, wErr := os.Stdout.Write(output)
-		return wErr
+		return writeAsk(os.Stdout, "could not parse hook input")
 	}
 
 	// Only handle Bash tool calls.
 	if input.ToolName != "Bash" {
-		return nil
+		return writeAsk(os.Stdout, "not a Bash tool call")
 	}
 
 	// Load allow/deny patterns from user and project settings.
@@ -94,8 +88,7 @@ func run() error {
 	allowPatterns := matcher.ParsePatterns(perms.Allow)
 	denyPatterns := matcher.ParsePatterns(perms.Deny)
 	if len(allowPatterns) == 0 {
-		// No allow patterns configured — nothing to do.
-		return nil
+		return writeAsk(os.Stdout, "no allow patterns configured")
 	}
 
 	result := hook.Process(&input, allowPatterns, denyPatterns, log)
@@ -104,15 +97,22 @@ func run() error {
 	switch result.Kind {
 	case hook.ResultAllowed:
 		output, err = hook.MarshalAllow(result.Reason)
-	case hook.ResultParseError:
-		output, err = hook.MarshalParseError()
 	default:
-		output, err = hook.MarshalDeny(result.BlockedCommand, result.Reason)
+		output, err = hook.MarshalAsk(result.Reason)
 	}
 	if err != nil {
 		return fmt.Errorf("marshal output: %w", err)
 	}
 
 	_, err = os.Stdout.Write(output)
+	return err
+}
+
+func writeAsk(w io.Writer, reason string) error {
+	output, err := hook.MarshalAsk(reason)
+	if err != nil {
+		return fmt.Errorf("marshal ask output: %w", err)
+	}
+	_, err = w.Write(output)
 	return err
 }

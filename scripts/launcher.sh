@@ -5,7 +5,7 @@
 #
 set -euo pipefail
 
-VERSION="0.9.3"
+VERSION="0.9.4"
 REPO="gwatts/claude-compound-bash"
 BINARY_NAME="claude-compound-bash"
 

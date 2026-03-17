@@ -152,34 +152,16 @@ func TestMarshalAllow(t *testing.T) {
 	assert.Equal(t, "PreToolUse", out.HookSpecificOutput.HookEventName)
 }
 
-func TestMarshalDeny(t *testing.T) {
-	data, err := MarshalDeny("rm -rf /", "not in allow list: \"rm -rf /\"")
+func TestMarshalAsk(t *testing.T) {
+	data, err := MarshalAsk("not in allow list")
 	require.NoError(t, err)
 
 	var out HookOutput
 	require.NoError(t, json.Unmarshal(data, &out))
-	assert.Nil(t, out.HookSpecificOutput)
-	assert.Contains(t, out.SystemMessage, "rm -rf /")
-	assert.Contains(t, out.SystemMessage, "not in allow list")
-}
-
-func TestMarshalDenyPreservesReason(t *testing.T) {
-	data, err := MarshalDeny("git push --force", `denied by deny rule: "git push --force"`)
-	require.NoError(t, err)
-
-	var out HookOutput
-	require.NoError(t, json.Unmarshal(data, &out))
-	assert.Contains(t, out.SystemMessage, "denied by deny rule")
-	assert.Contains(t, out.SystemMessage, "git push --force")
-}
-
-func TestMarshalParseError(t *testing.T) {
-	data, err := MarshalParseError()
-	require.NoError(t, err)
-
-	var out HookOutput
-	require.NoError(t, json.Unmarshal(data, &out))
-	assert.Contains(t, out.SystemMessage, "could not parse")
+	require.NotNil(t, out.HookSpecificOutput)
+	assert.Equal(t, "ask", out.HookSpecificOutput.PermissionDecision)
+	assert.Equal(t, "PreToolUse", out.HookSpecificOutput.HookEventName)
+	assert.Contains(t, out.HookSpecificOutput.PermissionDecisionReason, "not in allow list")
 }
 
 func TestProcessEvalDenied(t *testing.T) {
