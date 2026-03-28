@@ -113,6 +113,18 @@ func TestPatternMatches(t *testing.T) {
 
 		// Bare "Bash" without parens = match all.
 		{"Bash", "anything", true},
+
+		// sqlite3 SELECT queries — printer preserves double quotes in cmdStr.
+		// Prefix:glob format.
+		{"Bash(sqlite3:*\"SELECT *)", `sqlite3 /path/to/db.sqlite "SELECT id, title FROM bookmarks WHERE type = 1;"`, true},
+		{"Bash(sqlite3:*\"SELECT *)", `sqlite3 /path/to/db.sqlite "INSERT INTO foo VALUES (1);"`, false},
+		// FullGlob format.
+		{"Bash(sqlite3 *\"SELECT *)", `sqlite3 /path/to/db.sqlite "SELECT id, title FROM bookmarks WHERE type = 1;"`, true},
+		{"Bash(sqlite3 *\"SELECT *)", `sqlite3 /path/to/db.sqlite "DROP TABLE foo;"`, false},
+		// INSERT with a SELECT subclause — the " is not before SELECT, so no match.
+		{"Bash(sqlite3:*\"SELECT *)", `sqlite3 /path/to/db.sqlite "INSERT INTO foo SELECT * FROM bar;"`, false},
+		// Without quote char — matches regardless of quoting style.
+		{"Bash(sqlite3:*SELECT *)", `sqlite3 /path/to/db.sqlite "SELECT id FROM foo;"`, true},
 	}
 
 	for _, tt := range tests {
