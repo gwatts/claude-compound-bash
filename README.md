@@ -30,6 +30,40 @@ For example, `echo "there are $(ls | wc -l) files"` is parsed into three sub-com
 
 **Deny rules always win** -- deny patterns from any scope (user or project settings) block approval, matching Claude Code's own semantics.
 
+### Redirect validation
+
+Output redirects (`>`, `>>`, `&>`, etc.) are validated to prevent writes outside allowed directories. This matches the built-in Claude Code Bash tool's behavior.
+
+**Auto-allowed:**
+- Redirects to files inside the current working directory
+- Safe devices: `/dev/null`, `/dev/stdout`, `/dev/stderr`, `/dev/stdin`, `/dev/zero`, `/dev/random`, `/dev/urandom`
+- FD-to-FD duplications: `2>&1`, `>&2`
+- Heredocs and here-strings: `<<EOF`, `<<<`
+
+**Requires confirmation:**
+- Redirects outside the working directory (unless in `additionalOutputDirs`)
+- Protected paths: `.git/` and `.claude/` directories at any nesting level
+- Dynamic targets: `> $FILE`, `> ~/file`, `> *.log`, extglob patterns
+- Relative redirects when `cd`, `pushd`, `popd`, or `ln` appear in the command (TOCTOU protection)
+
+**Not checked:** Input redirects (`<`, `<<`) are not validated, matching the built-in Bash tool.
+
+Symlinks are fully resolved before path checks to prevent escape attacks.
+
+#### Additional output directories
+
+To allow redirects to directories outside cwd (e.g., `/tmp`), add them to your settings:
+
+```json
+{
+  "permissions": {
+    "additionalOutputDirs": ["/tmp", "/var/log/myapp"]
+  }
+}
+```
+
+On macOS, `/tmp` automatically includes `/private/tmp` and `$TMPDIR`. Paths must be absolute.
+
 ### Command safety tiers
 
 Commands are classified into tiers to minimize how many explicit allow rules you need:

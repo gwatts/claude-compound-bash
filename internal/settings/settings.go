@@ -14,17 +14,19 @@ type settings struct {
 
 // permissions holds the allow/ask/deny lists.
 type permissions struct {
-	Allow []string `json:"allow"`
-	Ask   []string `json:"ask"`
-	Deny  []string `json:"deny"`
+	Allow                []string `json:"allow"`
+	Ask                  []string `json:"ask"`
+	Deny                 []string `json:"deny"`
+	AdditionalOutputDirs []string `json:"additionalOutputDirs,omitempty"`
 }
 
 // ResolvedPermissions holds merged allow/ask/deny patterns ready for use by the hook.
 type ResolvedPermissions struct {
-	Allow   []string
-	Ask     []string
-	Deny    []string
-	Sources []string // settings files that contributed patterns
+	Allow                []string
+	Ask                  []string
+	Deny                 []string
+	AdditionalOutputDirs []string // directories allowed for output redirects
+	Sources              []string // settings files that contributed patterns
 }
 
 // LoadPermissions reads allow and deny patterns from the user's global Claude
@@ -63,10 +65,11 @@ func LoadPermissions() (*ResolvedPermissions, error) {
 		if err != nil {
 			continue
 		}
-		if len(perms.Allow) > 0 || len(perms.Ask) > 0 || len(perms.Deny) > 0 {
+		if len(perms.Allow) > 0 || len(perms.Ask) > 0 || len(perms.Deny) > 0 || len(perms.AdditionalOutputDirs) > 0 {
 			result.Allow = append(result.Allow, perms.Allow...)
 			result.Ask = append(result.Ask, perms.Ask...)
 			result.Deny = append(result.Deny, perms.Deny...)
+			result.AdditionalOutputDirs = append(result.AdditionalOutputDirs, perms.AdditionalOutputDirs...)
 			result.Sources = append(result.Sources, path)
 		}
 	}
