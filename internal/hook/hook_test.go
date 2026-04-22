@@ -656,7 +656,7 @@ func TestProcessRedirectWithAdditionalDirs(t *testing.T) {
 	assert.Equal(t, ResultAllowed, result.Kind, "output to /opt/logs should be allowed with additional dirs")
 }
 
-// Test that relative paths in additionalOutputDirs are rejected.
+// Test that relative paths in additionalDirectories are rejected.
 func TestProcessRelativeAdditionalDirsRejected(t *testing.T) {
 	input := &HookInput{
 		ToolName:  "Bash",

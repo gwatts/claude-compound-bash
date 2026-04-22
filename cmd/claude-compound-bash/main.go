@@ -95,7 +95,7 @@ func run() error {
 		return writeAsk(os.Stdout, "no allow patterns configured")
 	}
 
-	result := hook.Process(&input, allowPatterns, askPatterns, denyPatterns, perms.AdditionalOutputDirs, log)
+	result := hook.Process(&input, allowPatterns, askPatterns, denyPatterns, perms.AdditionalDirectories, log)
 
 	var output []byte
 	switch result.Kind {

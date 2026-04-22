@@ -199,7 +199,7 @@ func ExpandAdditionalDirs(dirs []string) ([]string, error) {
 	for _, dir := range dirs {
 		// Require absolute paths to avoid ambiguity about what cwd they're relative to
 		if !filepath.IsAbs(dir) {
-			return nil, fmt.Errorf("additionalOutputDirs must be absolute paths, got %q", dir)
+			return nil, fmt.Errorf("additionalDirectories must be absolute paths, got %q", dir)
 		}
 
 		// Clean and normalize the path

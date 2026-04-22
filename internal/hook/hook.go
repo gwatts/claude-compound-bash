@@ -67,8 +67,8 @@ type Result struct {
 
 // Process evaluates a hook input against the given allow, ask, and deny patterns.
 // Evaluation order matches Claude Code: deny → ask → allow (first match wins).
-// additionalOutputDirs specifies extra directories where output redirects are allowed.
-func Process(input *HookInput, allowPatterns []matcher.Pattern, askPatterns []matcher.Pattern, denyPatterns []matcher.Pattern, additionalOutputDirs []string, log *logfile.Logger) Result {
+// additionalDirectories specifies extra directories where output redirects are allowed.
+func Process(input *HookInput, allowPatterns []matcher.Pattern, askPatterns []matcher.Pattern, denyPatterns []matcher.Pattern, additionalDirectories []string, log *logfile.Logger) Result {
 	if input.ToolName != "Bash" {
 		return Result{Kind: ResultAsk, Reason: "not a Bash tool call"}
 	}
@@ -122,7 +122,7 @@ func Process(input *HookInput, allowPatterns []matcher.Pattern, askPatterns []ma
 
 	// PHASE 2: Check redirects (output redirects only, per design decision)
 	// Expand additional output directories (handles /tmp -> /private/tmp on macOS)
-	expandedDirs, err := parser.ExpandAdditionalDirs(additionalOutputDirs)
+	expandedDirs, err := parser.ExpandAdditionalDirs(additionalDirectories)
 	if err != nil {
 		log.Log("config error: %v", err)
 		return Result{

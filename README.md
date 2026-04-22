@@ -41,7 +41,7 @@ Output redirects (`>`, `>>`, `&>`, etc.) are validated to prevent writes outside
 - Heredocs and here-strings: `<<EOF`, `<<<`
 
 **Requires confirmation:**
-- Redirects outside the working directory (unless in `additionalOutputDirs`)
+- Redirects outside the working directory (unless in `additionalDirectories`)
 - Protected paths: `.git/` and `.claude/` directories at any nesting level
 - Dynamic targets: `> $FILE`, `> ~/file`, `> *.log`, extglob patterns
 - Relative redirects when `cd`, `pushd`, `popd`, or `ln` appear in the command (TOCTOU protection)
@@ -52,17 +52,17 @@ Symlinks are fully resolved before path checks to prevent escape attacks.
 
 #### Additional output directories
 
-To allow redirects to directories outside cwd (e.g., `/tmp`), add them to your settings:
+To allow redirects to directories outside cwd (e.g., `/tmp`), add them to Claude Code's standard `additionalDirectories` setting:
 
 ```json
 {
   "permissions": {
-    "additionalOutputDirs": ["/tmp", "/var/log/myapp"]
+    "additionalDirectories": ["/tmp", "/var/log/myapp"]
   }
 }
 ```
 
-On macOS, `/tmp` automatically includes `/private/tmp` and `$TMPDIR`. Paths must be absolute.
+This is the same key Claude Code uses to extend its workspace, so no separate configuration is needed. On macOS, `/tmp` automatically includes `/private/tmp` and `$TMPDIR`. Paths must be absolute.
 
 ### Command safety tiers
 
