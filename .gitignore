@@ -1,6 +1,8 @@
 # Build artifacts
 /bin/
 /dist/
+# Compiled binary from `go build ./cmd/claude-compound-bash`
+/cmd/claude-compound-bash/claude-compound-bash
 
 # IDE
 .idea/

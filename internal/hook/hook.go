@@ -103,14 +103,15 @@ func Process(input *HookInput, allowPatterns []matcher.Pattern, askPatterns []ma
 	log.Log("parsed %d sub-command(s), %d redirect(s)", len(commands), len(parseResult.Redirects))
 
 	// PHASE 1: Check all commands for DENY patterns first.
-	// Deny rules must always win, even if redirects would trigger ask.
+	// Deny rules must always win, even if redirects would trigger ask. This
+	// looks through command wrappers too, so a denied payload (e.g. `xargs rm`
+	// with rm denied) is cancelled regardless of any later redirect/ask.
 	for _, cmd := range commands {
 		if cmd.Dynamic {
-			continue // Dynamic commands can't match deny patterns by name
+			continue // Dynamic outer command can't be unwrapped or matched by name
 		}
-		cmdStr := strings.Join(cmd.Args, " ")
-		if len(denyPatterns) > 0 && matcher.MatchesAny(cmdStr, denyPatterns) {
-			reason := fmt.Sprintf("denied by deny rule: %q", cmdStr)
+		if denied, ok := denyMatchDeep(cmd, denyPatterns, 0); ok {
+			reason := fmt.Sprintf("denied by deny rule: %q", denied)
 			log.Log("DENY [%s]: %s", cmd.String(), reason)
 			return Result{
 				Kind:           ResultDenyRule,
@@ -183,8 +184,44 @@ const (
 	commandDenied                // matched deny rule
 )
 
+// maxWrapperDepth bounds how deep wrapper unwrapping recurses (e.g. xargs
+// invoking find -exec). Real commands never nest this far; the bound just
+// guarantees termination and fails closed on absurd input.
+const maxWrapperDepth = 3
+
 // checkCommand determines if a single command is allowed.
 func checkCommand(cmd parser.Command, allowPatterns []matcher.Pattern, askPatterns []matcher.Pattern, denyPatterns []matcher.Pattern, log *logfile.Logger) (commandResult, string) {
+	return checkCommandDepth(cmd, allowPatterns, askPatterns, denyPatterns, log, 0)
+}
+
+// denyMatchDeep returns the first command — cmd itself or any command it wraps
+// (xargs/find -exec, recursively) — that matches a deny pattern. Because deny
+// must win over every other decision, Process consults this in PHASE 1, before
+// the redirect and ask/allow phases.
+func denyMatchDeep(cmd parser.Command, denyPatterns []matcher.Pattern, depth int) (string, bool) {
+	if len(denyPatterns) == 0 {
+		return "", false
+	}
+	if !cmd.Dynamic {
+		cmdStr := strings.Join(cmd.Args, " ")
+		if matcher.MatchesAny(cmdStr, denyPatterns) {
+			return cmdStr, true
+		}
+	}
+	if depth >= maxWrapperDepth {
+		return "", false
+	}
+	if inners, isWrapper := parser.WrapperInner(cmd); isWrapper {
+		for _, inner := range inners {
+			if denied, ok := denyMatchDeep(inner, denyPatterns, depth+1); ok {
+				return denied, true
+			}
+		}
+	}
+	return "", false
+}
+
+func checkCommandDepth(cmd parser.Command, allowPatterns []matcher.Pattern, askPatterns []matcher.Pattern, denyPatterns []matcher.Pattern, log *logfile.Logger, depth int) (commandResult, string) {
 	// Dynamic command names — can't determine what runs.
 	if cmd.Dynamic {
 		return commandAsk, fmt.Sprintf("dynamic command name in %q", cmd.String())
@@ -193,11 +230,52 @@ func checkCommand(cmd parser.Command, allowPatterns []matcher.Pattern, askPatter
 	name := cmd.Name
 	cmdStr := strings.Join(cmd.Args, " ")
 
-	// Evaluation order: deny → ask → allow (first match wins).
+	// Evaluation order: deny → ask → allow (first match wins), with deny always
+	// winning — including a deny rule that matches the payload of a wrapper.
 
-	// Deny rules always win.
+	// Deny on this command's own name/args.
 	if len(denyPatterns) > 0 && matcher.MatchesAny(cmdStr, denyPatterns) {
 		return commandDenied, fmt.Sprintf("denied by deny rule: %q", cmdStr)
+	}
+
+	// Command wrappers (xargs, find -exec) reveal nothing by their own name —
+	// classify the command they forward to instead, using the same rules. This
+	// keeps `xargs grep`/`find -exec grep` as quiet as a plain grep while still
+	// asking for `xargs rm`/`find -exec rm`. The payload is evaluated before any
+	// ask rule on the wrapper itself is honored, so a denied payload still wins
+	// and is never downgraded to an ask. A wrapper whose payload can't be read,
+	// or that nests past maxWrapperDepth, fails closed to an ask.
+	if inners, isWrapper := parser.WrapperInner(cmd); isWrapper {
+		if depth >= maxWrapperDepth {
+			return commandAsk, fmt.Sprintf("%q: wrapper nesting too deep", name)
+		}
+		if len(inners) == 0 {
+			return commandAsk, fmt.Sprintf("%q: could not determine wrapped command", name)
+		}
+		// A denied payload wins over everything below — deny always outranks the
+		// side-effect and ask checks.
+		outerAsk := len(askPatterns) > 0 && matcher.MatchesAny(cmdStr, askPatterns)
+		result, reason := commandAllowed, fmt.Sprintf("%q wraps approved command(s)", name)
+		for _, inner := range inners {
+			res, r := checkCommandDepth(inner, allowPatterns, askPatterns, denyPatterns, log, depth+1)
+			if res == commandDenied {
+				return commandDenied, fmt.Sprintf("%q wraps denied command: %s", name, r)
+			}
+			if res == commandAsk && result != commandAsk {
+				result, reason = commandAsk, fmt.Sprintf("%q wraps unapproved command: %s", name, r)
+			}
+		}
+		// We only validate the -exec/-execdir payload of a find. If the same
+		// expression carries another side-effecting action (-delete, -fprintf,
+		// -ok, ...), a safe payload must not auto-approve it — fail closed.
+		if parser.FindHasMutatingNonExecAction(cmd) {
+			return commandAsk, fmt.Sprintf("%q has a side-effecting action beyond -exec", name)
+		}
+		// An ask rule on the wrapper itself forces an ask (deny was ruled out above).
+		if outerAsk {
+			return commandAsk, fmt.Sprintf("matched ask rule: %q", cmdStr)
+		}
+		return result, reason
 	}
 
 	// Ask rules override allow rules and safe builtins.

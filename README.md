@@ -80,6 +80,22 @@ Commands are classified into tiers to minimize how many explicit allow rules you
 
 **Everything else** (external commands like `git`, `npm`, `curl`, `sed`, etc.) requires a matching allow pattern in your settings.
 
+### Command wrappers
+
+Some commands reveal nothing by their own name -- the danger (or safety) lives in
+the command they forward to. These are unwrapped and the *inner* command is checked
+against the same rules:
+
+- `xargs [opts] CMD ...`
+- `find ... -exec CMD ... {} \;` and `find ... -execdir CMD ... {} +`
+
+So `rg --files | xargs grep -l Foo` and `find . -name '*.go' -exec grep -l Foo {} \;`
+are as quiet as a plain `grep` (assuming `grep` is allowed), while `xargs rm` and
+`find . -exec rm {} \;` still prompt. A wrapper whose payload can't be read fails
+closed (asks). This means you should *not* add a blanket `Bash(find * -exec *)` ask
+rule -- it would shadow the per-payload check; keep narrower action rules like
+`Bash(find * -delete*)` instead.
+
 ## Install
 
 ### Plugin (recommended)
