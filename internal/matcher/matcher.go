@@ -129,6 +129,28 @@ func MatchesAny(command string, patterns []Pattern) bool {
 	return false
 }
 
+// trailingArgSentinel is an improbable token appended when probing whether a
+// pattern tolerates an argument injected at runtime. It contains NUL bytes,
+// which cannot appear in a parsed command word, so it matches only a pattern
+// with a trailing wildcard — never an exact rule.
+const trailingArgSentinel = "\x00xargs-appended-arg\x00"
+
+// MatchesAnyAllowingTrailingArgs reports whether any pattern matches command
+// when at least one further argument may be appended to it at runtime — as xargs
+// does with stdin-derived tokens. A pattern qualifies only if it tolerates
+// arbitrary trailing content (e.g. a trailing wildcard), so an exact rule such
+// as Bash(rm /tmp/safe) does not approve `xargs rm /tmp/safe`, which actually
+// runs `rm /tmp/safe <stdin...>`.
+func MatchesAnyAllowingTrailingArgs(command string, patterns []Pattern) bool {
+	probe := command + " " + trailingArgSentinel
+	for i := range patterns {
+		if patterns[i].Matches(probe) {
+			return true
+		}
+	}
+	return false
+}
+
 // ParsePatterns parses a slice of permission strings, returning only valid
 // Bash(...) patterns.
 func ParsePatterns(perms []string) []Pattern {
