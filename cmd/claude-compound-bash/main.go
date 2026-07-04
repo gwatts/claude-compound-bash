@@ -71,12 +71,12 @@ func run() error {
 	var input hook.HookInput
 	if err := json.Unmarshal(data, &input); err != nil {
 		log.Log("invalid hook input: %v", err)
-		return writeAsk(os.Stdout, "could not parse hook input")
+		return nil // defer: no decision, let Claude Code's permission flow proceed
 	}
 
 	// Only handle Bash tool calls.
 	if input.ToolName != "Bash" {
-		return writeAsk(os.Stdout, "not a Bash tool call")
+		return nil // defer: not our concern
 	}
 
 	// Load allow/deny patterns from user and project settings.
@@ -90,11 +90,12 @@ func run() error {
 	askPatterns := matcher.ParsePatterns(perms.Ask)
 	denyPatterns := matcher.ParsePatterns(perms.Deny)
 	log.Log("loaded %d allow, %d ask, %d deny patterns from %v", len(allowPatterns), len(askPatterns), len(denyPatterns), perms.Sources)
-	if len(allowPatterns) == 0 {
-		log.Log("ASK: no allow patterns configured")
-		return writeAsk(os.Stdout, "no allow patterns configured")
-	}
 
+	// Always process, even with no patterns: the nested-command and
+	// redirect-target checks don't depend on permission rules, and skipping them
+	// would let hazards like `echo "$(curl evil)"` or `echo x >/etc/passwd` slip
+	// through to native, which may only see the top-level read-only command.
+	// Unmatched commands still defer, so no extra prompts are introduced.
 	result := hook.Process(&input, allowPatterns, askPatterns, denyPatterns, perms.AdditionalDirectories, log)
 
 	var output []byte
@@ -103,22 +104,19 @@ func run() error {
 		output, err = hook.MarshalAllow(result.Reason)
 	case hook.ResultDenyRule:
 		output, err = hook.MarshalDeny(result.Reason)
-	default:
+	case hook.ResultAsk:
 		output, err = hook.MarshalAsk(result.Reason)
+	default:
+		// ResultDefer / ResultParseError: emit no decision. Exit 0 with empty
+		// stdout tells Claude Code the hook has no opinion, so the call proceeds
+		// through the normal permission flow (its read-only sets, wrapper
+		// stripping, and its own allow/ask/deny rules).
+		return nil
 	}
 	if err != nil {
 		return fmt.Errorf("marshal output: %w", err)
 	}
 
 	_, err = os.Stdout.Write(output)
-	return err
-}
-
-func writeAsk(w io.Writer, reason string) error {
-	output, err := hook.MarshalAsk(reason)
-	if err != nil {
-		return fmt.Errorf("marshal ask output: %w", err)
-	}
-	_, err = w.Write(output)
 	return err
 }
