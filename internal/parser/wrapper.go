@@ -192,11 +192,17 @@ var xargsShortOptsWithArg = map[byte]bool{
 	'd': true, 'R': true, 'S': true,
 }
 
-// xargsLongOptsWithArg are the GNU long options that consume a following
-// separate argument when written without "=".
+// xargsLongOptsWithArg are the GNU long options that take a REQUIRED argument
+// and so consume a following separate token when written without "=".
+//
+// The optional-argument long options — --replace, --eof, and --max-lines (the
+// deprecated synonyms of -i/-e/-l) — are deliberately absent: getopt_long only
+// accepts their value attached via "=", so a bare "--replace" does NOT consume
+// the next token (it's the command). Listing them here would swallow the payload
+// command, e.g. parsing "xargs --replace rm -f {}" as if "rm" were the option's
+// value and hiding it from deny/allow matching.
 var xargsLongOptsWithArg = map[string]bool{
-	"--max-args": true, "--max-procs": true, "--max-lines": true,
-	"--replace": true, "--delimiter": true, "--eof": true,
+	"--max-args": true, "--max-procs": true, "--delimiter": true,
 	"--arg-file": true, "--max-chars": true, "--process-slot-var": true,
 }
 

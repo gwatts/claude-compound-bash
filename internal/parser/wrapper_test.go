@@ -40,6 +40,12 @@ func TestWrapperInnerXargs(t *testing.T) {
 		{"cluster boolean then count", "xargs -rn 1 grep x", []string{"grep"}},
 		{"bsd replsize separate", "xargs -S 999 rm -rf", []string{"rm"}},
 		{"bsd replsize cluster", "xargs -0S 4096 rm", []string{"rm"}},
+		// Optional-argument long options don't consume a separate token: bare
+		// --replace/--eof/--max-lines leave the next token as the command.
+		{"bare --replace", "xargs --replace rm -f {}", []string{"rm"}},
+		{"attached --replace", "xargs --replace=% cp % dest", []string{"cp"}},
+		{"bare --eof", "xargs --eof rm -rf", []string{"rm"}},
+		{"bare --max-lines", "xargs --max-lines grep x", []string{"grep"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -76,6 +82,7 @@ func TestWrapperInnerXargsAppendsArgs(t *testing.T) {
 		{"replace -J substitutes", "xargs -J% cp % dest", false},
 		{"replace deprecated -i", "xargs -i cp {} dest", false},
 		{"replace long form", "xargs --replace=% cp % dest", false},
+		{"bare --replace substitutes", "xargs --replace cp {} dest", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

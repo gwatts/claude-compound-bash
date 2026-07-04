@@ -182,6 +182,22 @@ func TestWrapperXargsClusteredOptionsDenyStillWins(t *testing.T) {
 	}
 }
 
+func TestWrapperXargsOptionalLongOptionsDenyStillWins(t *testing.T) {
+	// GNU optional-argument long options (--replace/--eof/--max-lines) take their
+	// value only when attached via "=". A bare form must leave the next token as
+	// the command, so the deny on the real payload still fires rather than being
+	// hidden behind a swallowed option value.
+	deny := patterns("Bash(rm:*)")
+	for _, cmd := range []string{
+		`printf 'victim\n' | xargs --replace rm -f {}`,
+		`printf 'victim\n' | xargs --eof rm -rf`,
+		`printf 'victim\n' | xargs --replace=% rm -f %`,
+	} {
+		result := Process(bash(cmd), nil, nil, deny, nil, nopLog())
+		assert.Equalf(t, ResultDenyRule, result.Kind, "cmd: %s (%s)", cmd, result.Reason)
+	}
+}
+
 func TestWrapperDenyPayloadBeyondDepthLimitStillDenied(t *testing.T) {
 	// Regression: a denied payload nested past maxWrapperDepth must still be
 	// cancelled, not downgraded to an ask. The deny traversal is exhaustive, so
