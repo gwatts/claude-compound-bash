@@ -122,16 +122,18 @@ func TestWrapperXargsAppendedArgsNotApprovedByExactRule(t *testing.T) {
 	// xargs appends stdin-derived tokens to the payload, so `xargs rm /tmp/safe`
 	// really runs `rm /tmp/safe <stdin...>`. An exact allow rule for the static
 	// form must NOT approve it — otherwise a narrow rule would green-light deleting
-	// files it never named. The hook defers so native prompts.
+	// files it never named. And because native strips (bare) xargs and would
+	// approve on that same exact rule, deferring is unsafe — the hook must force a
+	// prompt.
 	exact := patterns("Bash(rm /tmp/safe)")
-	deferCases := []string{
+	askCases := []string{
 		`printf '/tmp/important\n' | xargs rm /tmp/safe`,
 		`printf '/tmp/important\n' | xargs -n1 rm /tmp/safe`, // flagged: native wouldn't strip this
 		`printf 'x\n' | xargs timeout 5 rm /tmp/safe`,        // append flag propagates through timeout
 	}
-	for _, cmd := range deferCases {
+	for _, cmd := range askCases {
 		result := Process(bash(cmd), exact, nil, nil, nil, nopLog())
-		assert.Equalf(t, ResultDefer, result.Kind, "cmd: %s (%s)", cmd, result.Reason)
+		assert.Equalf(t, ResultAsk, result.Kind, "cmd: %s (%s)", cmd, result.Reason)
 	}
 
 	// A trailing-wildcard rule DOES tolerate the appended args, so it still allows
@@ -235,11 +237,11 @@ func TestWrapperFindExecMixedPayloads(t *testing.T) {
 	assert.Equal(t, ResultDefer, result.Kind)
 }
 
-func TestWrapperFindExecMutatingActionDefers(t *testing.T) {
+func TestWrapperFindExecMutatingActionAsks(t *testing.T) {
 	// Regression: a safe -exec payload must not auto-approve a find that also
-	// carries a side-effecting action. With only grep allowed and no ask rules,
-	// these must not be approved — the hook defers so the destructive action
-	// can't slip through on the strength of the -exec payload.
+	// carries a side-effecting action. The mutating action is a definite hazard
+	// the hook detected, and native's `find *` handling of -fprintf/-fls/-ok is
+	// unverified, so the hook forces a prompt rather than deferring.
 	allow := patterns("Bash(grep:*)")
 	tests := []string{
 		`find . -delete -exec grep X {} \;`,
@@ -250,7 +252,7 @@ func TestWrapperFindExecMutatingActionDefers(t *testing.T) {
 	}
 	for _, cmd := range tests {
 		result := Process(bash(cmd), allow, nil, nil, nil, nopLog())
-		assert.Equalf(t, ResultDefer, result.Kind, "cmd: %s (%s)", cmd, result.Reason)
+		assert.Equalf(t, ResultAsk, result.Kind, "cmd: %s (%s)", cmd, result.Reason)
 	}
 }
 
@@ -264,15 +266,16 @@ func TestWrapperFindExecMutatingActionDenyStillWins(t *testing.T) {
 }
 
 func TestWrapperFindOkNotAllowedByGenericFind(t *testing.T) {
-	// Regression: -ok/-okdir run a command but have no -exec, so they must not
-	// ride a generic `Bash(find *)` allow — the hook defers instead.
+	// Regression: -ok/-okdir run a command but have no -exec, so their payload is
+	// undeterminable and must not ride a generic `Bash(find *)` allow. Native may
+	// approve such a find under that broad rule, so the hook forces a prompt.
 	allow := patterns("Bash(find *)", "Bash(grep:*)")
 	for _, cmd := range []string{
 		`find . -ok rm {} \;`,
 		`find . -okdir rm {} \;`,
 	} {
 		result := Process(bash(cmd), allow, nil, nil, nil, nopLog())
-		assert.Equalf(t, ResultDefer, result.Kind, "cmd: %s (%s)", cmd, result.Reason)
+		assert.Equalf(t, ResultAsk, result.Kind, "cmd: %s (%s)", cmd, result.Reason)
 	}
 }
 

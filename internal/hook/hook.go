@@ -295,6 +295,13 @@ func checkCommandDepth(cmd parser.Command, allowPatterns []matcher.Pattern, askP
 			return commandDefer, fmt.Sprintf("%q: wrapper nesting too deep", name)
 		}
 		if len(inners) == 0 {
+			// A find whose payload we can't read (e.g. `find . -ok CMD`) is a
+			// hazard native may approve under a broad `find *` rule — force a
+			// prompt. For other wrappers (bare xargs, etc.) native evaluates an
+			// equivalent command, so defer.
+			if name == "find" {
+				return commandAsk, fmt.Sprintf("%q: could not determine wrapped command", name)
+			}
 			return commandDefer, fmt.Sprintf("%q: could not determine wrapped command", name)
 		}
 		// Aggregate the payload outcomes by severity: denied wins outright; an
@@ -329,10 +336,12 @@ func checkCommandDepth(cmd parser.Command, allowPatterns []matcher.Pattern, askP
 		}
 		// We only validate the -exec/-execdir payload of a find. If the same
 		// expression carries another side-effecting action (-delete, -fprintf,
-		// -ok, ...), a safe payload must not auto-approve it — defer so native's
-		// own handling (which also gates find -delete/-exec) applies.
+		// -ok, ...), a safe payload must not auto-approve it. This is a definite
+		// hazard the hook detected: native's `find *` handling gates -delete/-exec
+		// but its treatment of -fprintf/-fls/-ok is unverified, so force a prompt
+		// rather than defer.
 		if parser.FindHasMutatingNonExecAction(cmd) {
-			return commandDefer, fmt.Sprintf("%q has a side-effecting action beyond -exec", name)
+			return commandAsk, fmt.Sprintf("%q has a side-effecting action beyond -exec", name)
 		}
 		return result, reason
 	}
@@ -362,6 +371,13 @@ func checkCommandDepth(cmd parser.Command, allowPatterns []matcher.Pattern, askP
 	if appendsArgs {
 		if matcher.MatchesAnyAllowingTrailingArgs(cmdStr, allowPatterns) {
 			return commandAllowed, fmt.Sprintf("matched allow pattern (with appended args) for %q", cmdStr)
+		}
+		if matcher.MatchesAny(cmdStr, allowPatterns) {
+			// The static form matches a rule, but that rule doesn't cover the
+			// appended args. Deferring would be unsafe: native strips (bare) xargs
+			// and would approve on this same rule without seeing the appended
+			// tokens. Force a prompt instead.
+			return commandAsk, fmt.Sprintf("xargs payload matches only a rule that doesn't cover its appended args: %q", cmdStr)
 		}
 		return commandDefer, fmt.Sprintf("not in allow list for appended-args command: %q", cmdStr)
 	}
