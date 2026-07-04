@@ -24,11 +24,11 @@ func TestWrapperXargsAllowsSafePayload(t *testing.T) {
 	}
 }
 
-func TestWrapperXargsAsksDangerousPayload(t *testing.T) {
+func TestWrapperXargsDefersDangerousPayload(t *testing.T) {
 	allow := patterns("Bash(grep:*)", "Bash(rg:*)")
-	// rm is not allow-listed, so the wrapper must defer to an ask.
+	// rm is not allow-listed, so the hook can't approve it — defer to native.
 	result := Process(bash(`rg --files | xargs rm -rf`), allow, nil, nil, nil, nopLog())
-	assert.Equal(t, ResultAsk, result.Kind)
+	assert.Equal(t, ResultDefer, result.Kind)
 }
 
 func TestWrapperXargsRespectsDenyAndAsk(t *testing.T) {
@@ -64,6 +64,78 @@ func TestWrapperFindExecDenyPayloadBeatsAsk(t *testing.T) {
 	assert.Equal(t, ResultDenyRule, result.Kind)
 }
 
+func TestProcessWrapperAllowsApprovedInner(t *testing.T) {
+	allow := patterns("Bash(npm test *)", "Bash(make *)", "Bash(grep:*)")
+	tests := []string{
+		`timeout 30 npm test --coverage`,
+		`nice -n 10 make build`,
+		`nohup make build`,
+		`stdbuf -oL -eL grep foo`,
+		`time npm test --coverage`, // bash reserved word: parser unwraps to `npm test`
+	}
+	for _, cmd := range tests {
+		result := Process(bash(cmd), allow, nil, nil, nil, nopLog())
+		assert.Equalf(t, ResultAllowed, result.Kind, "cmd: %s (%s)", cmd, result.Reason)
+	}
+}
+
+func TestProcessWrapperDefersUnapprovedInner(t *testing.T) {
+	// The wrapper is transparent: an inner command with no allow rule can't be
+	// approved, so the hook defers rather than auto-allow on the wrapper's name.
+	allow := patterns("Bash(npm test *)")
+	result := Process(bash(`timeout 30 rm -rf /x`), allow, nil, nil, nil, nopLog())
+	assert.Equal(t, ResultDefer, result.Kind)
+}
+
+func TestProcessWrapperDenyPayloadStillDenied(t *testing.T) {
+	// Prefixing a denied command with an exec wrapper must not evade the deny —
+	// the deny scan looks through the wrapper.
+	allow := patterns("Bash(npm test *)")
+	deny := patterns("Bash(rm:*)")
+	for _, cmd := range []string{
+		`timeout 30 rm -rf /x`,
+		`nice -n 10 rm -rf /x`,
+		`nohup rm -rf /x`,
+		`stdbuf -oL rm -rf /x`,
+	} {
+		result := Process(bash(cmd), allow, nil, deny, nil, nopLog())
+		assert.Equalf(t, ResultDenyRule, result.Kind, "cmd: %s (%s)", cmd, result.Reason)
+	}
+}
+
+func TestProcessWrapperNestedWithOtherWrappers(t *testing.T) {
+	// Exec wrappers compose with the xargs/find wrappers, and the deny scan sees
+	// through the whole stack.
+	allow := patterns("Bash(grep:*)")
+	deny := patterns("Bash(rm:*)")
+
+	// A safe inner stays quiet through stacked wrappers.
+	ok := Process(bash(`rg --files | xargs nice grep -l foo`), append(allow, patterns("Bash(rg:*)")...), nil, nil, nil, nopLog())
+	assert.Equalf(t, ResultAllowed, ok.Kind, "reason: %s", ok.Reason)
+
+	// A denied inner is caught through find -exec + timeout.
+	denied := Process(bash(`find . -exec timeout 5 rm {} \;`), allow, nil, deny, nil, nopLog())
+	assert.Equal(t, ResultDenyRule, denied.Kind)
+}
+
+func TestWrapperDenyPayloadBeyondDepthLimitStillDenied(t *testing.T) {
+	// Regression: a denied payload nested past maxWrapperDepth must still be
+	// cancelled, not downgraded to an ask. The deny traversal is exhaustive, so
+	// even wrappers stacked deeper than the approval path recurses cannot smuggle
+	// a denied command through to a manual approval prompt.
+	allow := patterns("Bash(grep:*)")
+	deny := patterns("Bash(rm:*)")
+
+	// maxWrapperDepth+2 layers of xargs wrapping a denied rm.
+	denied := Process(bash(`echo f | xargs xargs xargs xargs xargs rm -rf`), allow, nil, deny, nil, nopLog())
+	assert.Equal(t, ResultDenyRule, denied.Kind, "denied rm must be cancelled however deeply it is wrapped")
+
+	// A safe payload nested equally deep is not denied — it simply can't be
+	// auto-approved past the depth limit, so it defers (never silently allowed).
+	deferred := Process(bash(`echo f | xargs xargs xargs xargs xargs grep -l foo`), allow, nil, deny, nil, nopLog())
+	assert.Equal(t, ResultDefer, deferred.Kind, "an over-depth safe payload defers, not denied")
+}
+
 func TestWrapperDenyPayloadBeatsRedirect(t *testing.T) {
 	// A denied payload must win even when a redirect would otherwise force an ask.
 	allow := patterns("Bash(grep:*)")
@@ -85,25 +157,27 @@ func TestWrapperFindExecAllowsSafePayload(t *testing.T) {
 	}
 }
 
-func TestWrapperFindExecAsksDangerousPayload(t *testing.T) {
+func TestWrapperFindExecDefersDangerousPayload(t *testing.T) {
 	allow := patterns("Bash(grep:*)", "Bash(find *)")
-	// Even though `find *` is allow-listed, an -exec rm payload must still ask:
-	// the wrapper gate runs before the generic find allow.
+	// Even though `find *` is allow-listed, an -exec rm payload must not ride it:
+	// the wrapper gate runs before the generic find allow, and rm isn't allowed,
+	// so the hook defers.
 	result := Process(bash(`find . -exec rm -rf {} \;`), allow, nil, nil, nil, nopLog())
-	assert.Equal(t, ResultAsk, result.Kind)
+	assert.Equal(t, ResultDefer, result.Kind)
 }
 
 func TestWrapperFindExecMixedPayloads(t *testing.T) {
 	allow := patterns("Bash(grep:*)", "Bash(find *)")
-	// First -exec is safe, second is not → overall ask.
+	// First -exec is safe, second is not → overall defer.
 	result := Process(bash(`find . -exec grep X {} \; -exec rm {} \;`), allow, nil, nil, nil, nopLog())
-	assert.Equal(t, ResultAsk, result.Kind)
+	assert.Equal(t, ResultDefer, result.Kind)
 }
 
-func TestWrapperFindExecMutatingActionAsks(t *testing.T) {
+func TestWrapperFindExecMutatingActionDefers(t *testing.T) {
 	// Regression: a safe -exec payload must not auto-approve a find that also
 	// carries a side-effecting action. With only grep allowed and no ask rules,
-	// these must still ask — the destructive action can't slip through.
+	// these must not be approved — the hook defers so the destructive action
+	// can't slip through on the strength of the -exec payload.
 	allow := patterns("Bash(grep:*)")
 	tests := []string{
 		`find . -delete -exec grep X {} \;`,
@@ -114,7 +188,7 @@ func TestWrapperFindExecMutatingActionAsks(t *testing.T) {
 	}
 	for _, cmd := range tests {
 		result := Process(bash(cmd), allow, nil, nil, nil, nopLog())
-		assert.Equalf(t, ResultAsk, result.Kind, "cmd: %s (%s)", cmd, result.Reason)
+		assert.Equalf(t, ResultDefer, result.Kind, "cmd: %s (%s)", cmd, result.Reason)
 	}
 }
 
@@ -129,14 +203,14 @@ func TestWrapperFindExecMutatingActionDenyStillWins(t *testing.T) {
 
 func TestWrapperFindOkNotAllowedByGenericFind(t *testing.T) {
 	// Regression: -ok/-okdir run a command but have no -exec, so they must not
-	// ride a generic `Bash(find *)` allow.
+	// ride a generic `Bash(find *)` allow — the hook defers instead.
 	allow := patterns("Bash(find *)", "Bash(grep:*)")
 	for _, cmd := range []string{
 		`find . -ok rm {} \;`,
 		`find . -okdir rm {} \;`,
 	} {
 		result := Process(bash(cmd), allow, nil, nil, nil, nopLog())
-		assert.Equalf(t, ResultAsk, result.Kind, "cmd: %s (%s)", cmd, result.Reason)
+		assert.Equalf(t, ResultDefer, result.Kind, "cmd: %s (%s)", cmd, result.Reason)
 	}
 }
 

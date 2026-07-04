@@ -43,8 +43,9 @@ type HookSpecific struct {
 type ResultKind int
 
 const (
-	// ResultAsk means one or more commands were not in the allow list.
-	// Defers to Claude Code's normal permission prompt.
+	// ResultAsk means the hook actively wants Claude Code to prompt: a command
+	// matched an explicit ask rule, or a redirect failed a safety check that the
+	// native permission system doesn't perform. The hook emits an "ask" decision.
 	ResultAsk ResultKind = iota
 	// ResultAllowed means all commands matched allow rules or were inert.
 	ResultAllowed
@@ -53,6 +54,14 @@ const (
 	// ResultDenyRule means a command matched an explicit deny pattern.
 	// The tool call is cancelled outright.
 	ResultDenyRule
+	// ResultDefer means the hook has no opinion — it can't affirmatively allow
+	// the command (nothing matched the allow list, or the command couldn't be
+	// classified), but it also has no reason to force a prompt. The hook emits no
+	// decision so Claude Code's own permission flow (read-only sets, wrapper
+	// stripping, its own rules) decides. This keeps the hook strictly additive:
+	// it only ever upgrades a call to allow/deny, never adds a prompt native
+	// wouldn't have shown on its own.
+	ResultDefer
 )
 
 // Result represents the outcome of processing a hook event.
@@ -70,12 +79,12 @@ type Result struct {
 // additionalDirectories specifies extra directories where output redirects are allowed.
 func Process(input *HookInput, allowPatterns []matcher.Pattern, askPatterns []matcher.Pattern, denyPatterns []matcher.Pattern, additionalDirectories []string, log *logfile.Logger) Result {
 	if input.ToolName != "Bash" {
-		return Result{Kind: ResultAsk, Reason: "not a Bash tool call"}
+		return Result{Kind: ResultDefer, Reason: "not a Bash tool call"}
 	}
 
 	command := input.ToolInput.Command
 	if command == "" {
-		return Result{Kind: ResultAsk, Reason: "empty command"}
+		return Result{Kind: ResultDefer, Reason: "empty command"}
 	}
 
 	log.Log("evaluating: %s", truncate(command, 200))
@@ -110,7 +119,7 @@ func Process(input *HookInput, allowPatterns []matcher.Pattern, askPatterns []ma
 		if cmd.Dynamic {
 			continue // Dynamic outer command can't be unwrapped or matched by name
 		}
-		if denied, ok := denyMatchDeep(cmd, denyPatterns, 0); ok {
+		if denied, ok := denyMatchDeep(cmd, denyPatterns); ok {
 			reason := fmt.Sprintf("denied by deny rule: %q", denied)
 			log.Log("DENY [%s]: %s", cmd.String(), reason)
 			return Result{
@@ -157,10 +166,21 @@ func Process(input *HookInput, allowPatterns []matcher.Pattern, askPatterns []ma
 				Reason:         reason,
 				BlockedCommand: cmd.String(),
 			}
-		default:
+		case commandAsk:
+			// An explicit ask rule matched. Force the prompt — native might miss
+			// this (e.g. an ask rule on a wrapper it strips), so we assert it.
 			log.Log("ASK [%s]: %s", cmd.String(), reason)
 			return Result{
 				Kind:           ResultAsk,
+				Reason:         reason,
+				BlockedCommand: cmd.String(),
+			}
+		default:
+			// commandDefer: we can't affirmatively allow this command, but we have
+			// no reason to force a prompt. Stay silent and let native decide.
+			log.Log("DEFER [%s]: %s", cmd.String(), reason)
+			return Result{
+				Kind:           ResultDefer,
 				Reason:         reason,
 				BlockedCommand: cmd.String(),
 			}
@@ -180,7 +200,8 @@ type commandResult int
 
 const (
 	commandAllowed commandResult = iota
-	commandAsk                   // not in allow list
+	commandDefer                 // can't affirmatively allow — defer to native
+	commandAsk                   // matched an explicit ask rule — force a prompt
 	commandDenied                // matched deny rule
 )
 
@@ -198,7 +219,15 @@ func checkCommand(cmd parser.Command, allowPatterns []matcher.Pattern, askPatter
 // (xargs/find -exec, recursively) — that matches a deny pattern. Because deny
 // must win over every other decision, Process consults this in PHASE 1, before
 // the redirect and ask/allow phases.
-func denyMatchDeep(cmd parser.Command, denyPatterns []matcher.Pattern, depth int) (string, bool) {
+//
+// Unlike the approval path (checkCommandDepth), this traversal is deliberately
+// NOT bounded by maxWrapperDepth. Deny is safety-critical and must never fail
+// open: bounding the search would let a denied payload buried under enough
+// wrapper layers (e.g. `xargs xargs xargs xargs rm`) escape the deny and be
+// downgraded to an ask. Termination is still guaranteed because every unwrapped
+// payload (args[i:] for xargs, the -exec slice for find) is a strict sub-slice
+// of its parent's args, so the argument count shrinks by at least one per level.
+func denyMatchDeep(cmd parser.Command, denyPatterns []matcher.Pattern) (string, bool) {
 	if len(denyPatterns) == 0 {
 		return "", false
 	}
@@ -208,12 +237,9 @@ func denyMatchDeep(cmd parser.Command, denyPatterns []matcher.Pattern, depth int
 			return cmdStr, true
 		}
 	}
-	if depth >= maxWrapperDepth {
-		return "", false
-	}
 	if inners, isWrapper := parser.WrapperInner(cmd); isWrapper {
 		for _, inner := range inners {
-			if denied, ok := denyMatchDeep(inner, denyPatterns, depth+1); ok {
+			if denied, ok := denyMatchDeep(inner, denyPatterns); ok {
 				return denied, true
 			}
 		}
@@ -222,9 +248,10 @@ func denyMatchDeep(cmd parser.Command, denyPatterns []matcher.Pattern, depth int
 }
 
 func checkCommandDepth(cmd parser.Command, allowPatterns []matcher.Pattern, askPatterns []matcher.Pattern, denyPatterns []matcher.Pattern, log *logfile.Logger, depth int) (commandResult, string) {
-	// Dynamic command names — can't determine what runs.
+	// Dynamic command names — can't determine what runs, so we can't allow it.
+	// Defer rather than force a prompt: native evaluates it too.
 	if cmd.Dynamic {
-		return commandAsk, fmt.Sprintf("dynamic command name in %q", cmd.String())
+		return commandDefer, fmt.Sprintf("dynamic command name in %q", cmd.String())
 	}
 
 	name := cmd.Name
@@ -241,44 +268,58 @@ func checkCommandDepth(cmd parser.Command, allowPatterns []matcher.Pattern, askP
 	// Command wrappers (xargs, find -exec) reveal nothing by their own name —
 	// classify the command they forward to instead, using the same rules. This
 	// keeps `xargs grep`/`find -exec grep` as quiet as a plain grep while still
-	// asking for `xargs rm`/`find -exec rm`. The payload is evaluated before any
+	// deferring `xargs rm`/`find -exec rm`. The payload is evaluated before any
 	// ask rule on the wrapper itself is honored, so a denied payload still wins
-	// and is never downgraded to an ask. A wrapper whose payload can't be read,
-	// or that nests past maxWrapperDepth, fails closed to an ask.
+	// and is never downgraded. A wrapper whose payload can't be read, or that
+	// nests past maxWrapperDepth, defers to native rather than auto-approving.
 	if inners, isWrapper := parser.WrapperInner(cmd); isWrapper {
 		if depth >= maxWrapperDepth {
-			return commandAsk, fmt.Sprintf("%q: wrapper nesting too deep", name)
+			return commandDefer, fmt.Sprintf("%q: wrapper nesting too deep", name)
 		}
 		if len(inners) == 0 {
-			return commandAsk, fmt.Sprintf("%q: could not determine wrapped command", name)
+			return commandDefer, fmt.Sprintf("%q: could not determine wrapped command", name)
 		}
-		// A denied payload wins over everything below — deny always outranks the
-		// side-effect and ask checks.
+		// Aggregate the payload outcomes by severity: denied wins outright; an
+		// explicit ask beats a defer; a defer beats an allow. (Deny was already
+		// ruled out for this command's own name/args above, and denyMatchDeep in
+		// PHASE 1 has looked through the whole wrapper nest.)
 		outerAsk := len(askPatterns) > 0 && matcher.MatchesAny(cmdStr, askPatterns)
 		result, reason := commandAllowed, fmt.Sprintf("%q wraps approved command(s)", name)
 		for _, inner := range inners {
 			res, r := checkCommandDepth(inner, allowPatterns, askPatterns, denyPatterns, log, depth+1)
-			if res == commandDenied {
+			switch res {
+			case commandDenied:
 				return commandDenied, fmt.Sprintf("%q wraps denied command: %s", name, r)
+			case commandAsk:
+				if result != commandAsk {
+					result, reason = commandAsk, fmt.Sprintf("%q wraps command needing confirmation: %s", name, r)
+				}
+			case commandDefer:
+				if result == commandAllowed {
+					result, reason = commandDefer, fmt.Sprintf("%q wraps unapproved command: %s", name, r)
+				}
 			}
-			if res == commandAsk && result != commandAsk {
-				result, reason = commandAsk, fmt.Sprintf("%q wraps unapproved command: %s", name, r)
-			}
+		}
+		// An explicit ask rule — matched by a payload or by the wrapper itself —
+		// forces a prompt, outranking the softer defer outcomes below (deny was
+		// already ruled out above).
+		if result == commandAsk {
+			return commandAsk, reason
+		}
+		if outerAsk {
+			return commandAsk, fmt.Sprintf("matched ask rule: %q", cmdStr)
 		}
 		// We only validate the -exec/-execdir payload of a find. If the same
 		// expression carries another side-effecting action (-delete, -fprintf,
-		// -ok, ...), a safe payload must not auto-approve it — fail closed.
+		// -ok, ...), a safe payload must not auto-approve it — defer so native's
+		// own handling (which also gates find -delete/-exec) applies.
 		if parser.FindHasMutatingNonExecAction(cmd) {
-			return commandAsk, fmt.Sprintf("%q has a side-effecting action beyond -exec", name)
-		}
-		// An ask rule on the wrapper itself forces an ask (deny was ruled out above).
-		if outerAsk {
-			return commandAsk, fmt.Sprintf("matched ask rule: %q", cmdStr)
+			return commandDefer, fmt.Sprintf("%q has a side-effecting action beyond -exec", name)
 		}
 		return result, reason
 	}
 
-	// Ask rules override allow rules and safe builtins.
+	// Ask rules force a prompt, overriding allow rules and safe builtins.
 	if len(askPatterns) > 0 && matcher.MatchesAny(cmdStr, askPatterns) {
 		return commandAsk, fmt.Sprintf("matched ask rule: %q", cmdStr)
 	}
@@ -302,7 +343,7 @@ func checkCommandDepth(cmd parser.Command, allowPatterns []matcher.Pattern, askP
 		return commandAllowed, fmt.Sprintf("matched allow pattern for %q", cmdStr)
 	}
 
-	return commandAsk, fmt.Sprintf("not in allow list: %q", cmdStr)
+	return commandDefer, fmt.Sprintf("not in allow list: %q", cmdStr)
 }
 
 // MarshalAllow produces the JSON output for an allow decision.

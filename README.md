@@ -14,11 +14,14 @@ The plugin registers a PreToolUse hook that intercepts every Bash tool call. It 
 
 Rules are evaluated in the same order as Claude Code: **deny → ask → allow**. The first matching rule wins.
 
-For each tool call, the hook returns one of three decisions:
+For each tool call, the hook returns one of four outcomes:
 
 - **`allow`** -- every sub-command is either a known-safe command or matches an allow pattern. The command runs without prompting.
-- **`ask`** -- at least one sub-command matches an ask pattern or isn't in the allow list. Claude Code shows its normal permission prompt.
 - **`deny`** -- a sub-command matches an explicit deny pattern. The tool call is cancelled outright and Claude receives feedback explaining why.
+- **`ask`** -- a sub-command matches an ask pattern, or a redirect fails a safety check that Claude Code doesn't perform itself. The hook forces Claude Code's permission prompt.
+- **defer** (no decision) -- the hook can't affirmatively approve the command (nothing matched the allow list, or it couldn't be classified) but has no reason to force a prompt. It stays silent and lets Claude Code's own permission flow decide.
+
+That last outcome is what keeps the hook **strictly additive**: it only ever *upgrades* a call to `allow` or `deny`, and never adds a prompt Claude Code wouldn't have shown on its own. Where the hook can't help, Claude Code's built-in handling (its read-only command set, [process-wrapper stripping](https://code.claude.com/docs/en/permissions#process-wrappers), and your own rules) takes over unchanged. Deferring is implemented the documented way -- exit 0 with empty stdout.
 
 ### What gets checked
 
@@ -26,7 +29,7 @@ For each tool call, the hook returns one of three decisions:
 
 For example, `echo "there are $(ls | wc -l) files"` is parsed into three sub-commands: `echo` (safe builtin), `ls` (safe read-only command), and `wc` (safe read-only command). Each is checked independently.
 
-**Dynamic command names rejected** -- `$CMD args` cannot be statically resolved, so it always defers to the prompt.
+**Dynamic command names** -- `$CMD args` cannot be statically resolved, so the hook can't approve it and defers to Claude Code's own handling.
 
 **Deny rules always win** -- deny patterns from any scope (user or project settings) block approval, matching Claude Code's own semantics.
 
@@ -88,13 +91,23 @@ against the same rules:
 
 - `xargs [opts] CMD ...`
 - `find ... -exec CMD ... {} \;` and `find ... -execdir CMD ... {} +`
+- Exec-prefix wrappers: `timeout [opts] DURATION CMD ...`, `nice [opts] CMD ...`,
+  `nohup CMD ...`, `stdbuf [opts] CMD ...`
 
-So `rg --files | xargs grep -l Foo` and `find . -name '*.go' -exec grep -l Foo {} \;`
-are as quiet as a plain `grep` (assuming `grep` is allowed), while `xargs rm` and
-`find . -exec rm {} \;` still prompt. A wrapper whose payload can't be read fails
-closed (asks). This means you should *not* add a blanket `Bash(find * -exec *)` ask
-rule -- it would shadow the per-payload check; keep narrower action rules like
-`Bash(find * -delete*)` instead.
+So `rg --files | xargs grep -l Foo`, `find . -name '*.go' -exec grep -l Foo {} \;`,
+and `timeout 30 npm test` are as quiet as the inner command alone (assuming it's
+allowed), while `xargs rm`, `find . -exec rm {} \;`, and `nice rm -rf /` still
+prompt. A wrapper whose payload can't be read fails closed (asks), and a deny rule
+on the inner command wins through any depth of wrapping. This means you should
+*not* add a blanket `Bash(find * -exec *)` ask rule -- it would shadow the
+per-payload check; keep narrower action rules like `Bash(find * -delete*)` instead.
+Because the wrapper is transparent, an allow rule on the wrapper name itself (e.g.
+`Bash(timeout *)`) does *not* approve its payload -- the inner command must match.
+
+This matches Claude Code's built-in wrapper stripping, with two intentional
+differences: this hook also unwraps `xargs` when it carries flags (`xargs -n1
+grep`) and `find -exec`, both of which Claude Code leaves as prompts. bash's `time`
+keyword needs no special handling -- the parser already treats `time CMD` as `CMD`.
 
 ## Install
 
@@ -168,15 +181,13 @@ The hook logs decisions to `~/.claude/logs/compound-bash.log` with version-tagge
 2026-03-16T21:15:14-05:00 [0.9.9] ALLOW: all 2 sub-command(s) matched
 ```
 
-When a command can't be approved, the log shows exactly which sub-command was the problem:
+When a command can't be approved, the log shows exactly which sub-command was the problem. The hook defers (emits no decision) and lets Claude Code's own permission flow handle it:
 
 ```
-2026-03-16T21:15:14-05:00 [0.9.9] evaluating: echo "$(ls | wc -l | xargs)"
-2026-03-16T21:15:14-05:00 [0.9.9] parsed 4 sub-command(s)
-2026-03-16T21:15:14-05:00 [0.9.9]   ok [echo "$(ls | wc -l | xargs)"]: "echo" is inert builtin
-2026-03-16T21:15:14-05:00 [0.9.9]   ok [ls]: "ls" is always-inert builtin
-2026-03-16T21:15:14-05:00 [0.9.9]   ok [wc -l]: "wc" is always-inert builtin
-2026-03-16T21:15:14-05:00 [0.9.9] ASK [xargs]: not in allow list: "xargs"
+2026-03-16T21:15:14-05:00 [0.9.9] evaluating: git status && curl example.com
+2026-03-16T21:15:14-05:00 [0.9.9] parsed 2 sub-command(s)
+2026-03-16T21:15:14-05:00 [0.9.9]   ok [git status]: matched allow pattern for "git status"
+2026-03-16T21:15:14-05:00 [0.9.9] DEFER [curl example.com]: not in allow list: "curl example.com"
 ```
 
 Set `CLAUDE_COMPOUND_LOG` to override the log path, or use `claude --debug` to see hook output in the transcript.
