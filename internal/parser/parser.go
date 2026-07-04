@@ -26,6 +26,14 @@ type Command struct {
 	// command flagged this way must only be auto-approved by an allow rule that
 	// tolerates arbitrary trailing arguments, never by an exact rule.
 	AppendsArgs bool
+	// Nested is true when this command was extracted from a position that Claude
+	// Code's own permission matcher does not reach with its command-separator
+	// splitting: inside a command substitution ($(...), `...`), process
+	// substitution, subshell, brace group, loop, if/case body, or function body.
+	// When the hook can't approve such a command it must force a prompt rather
+	// than defer, because native may auto-approve the enclosing (often read-only)
+	// command without ever seeing this one.
+	Nested bool
 }
 
 // ParseResult contains all information extracted from parsing a command.
@@ -63,6 +71,8 @@ func Parse(command string) (*ParseResult, error) {
 	}
 
 	var commands []Command
+	var cmdOffsets []uint // start offset of commands[i], for nesting classification
+	var hideRanges []offsetRange
 	var redirects []RedirectInfo
 	var hasCwdChanger bool
 	var hasLinkCreator bool
@@ -89,6 +99,7 @@ func Parse(command string) (*ParseResult, error) {
 			}
 			cmd := extractCallExpr(x, printer)
 			commands = append(commands, cmd)
+			cmdOffsets = append(cmdOffsets, x.Pos().Offset())
 
 			// Check for cwd-changing commands
 			if !cmd.Dynamic && isCwdChanger(cmd.Name) {
@@ -104,9 +115,28 @@ func Parse(command string) (*ParseResult, error) {
 			// export/declare/local/readonly/typeset
 			cmd := extractDeclClause(x, printer)
 			commands = append(commands, cmd)
+			cmdOffsets = append(cmdOffsets, x.Pos().Offset())
+		}
+
+		// Record the span of any construct that hides its inner commands from
+		// Claude Code's command-separator splitting, so commands extracted within
+		// it can be flagged as nested below.
+		if hidesInnerCommands(node) {
+			hideRanges = append(hideRanges, offsetRange{node.Pos().Offset(), node.End().Offset()})
 		}
 		return true
 	})
+
+	// A command is nested when its start offset falls inside a hiding construct.
+	for i := range commands {
+		off := cmdOffsets[i]
+		for _, r := range hideRanges {
+			if off >= r.start && off < r.end {
+				commands[i].Nested = true
+				break
+			}
+		}
+	}
 
 	return &ParseResult{
 		Commands:       commands,
@@ -114,6 +144,27 @@ func Parse(command string) (*ParseResult, error) {
 		HasCwdChanger:  hasCwdChanger,
 		HasLinkCreator: hasLinkCreator,
 	}, nil
+}
+
+// offsetRange is a half-open byte-offset span [start, end) in the source.
+type offsetRange struct {
+	start, end uint
+}
+
+// hidesInnerCommands reports whether a node encloses commands that Claude Code's
+// permission matcher won't reach by splitting on shell operators (&&, ||, ;, |,
+// &, newline). Commands inside these constructs are invisible to native, so the
+// hook must not defer them to it. BinaryCmd (the operator combinators) and
+// TimeClause (native strips a leading `time`) are deliberately excluded — native
+// does see through those.
+func hidesInnerCommands(n syntax.Node) bool {
+	switch n.(type) {
+	case *syntax.CmdSubst, *syntax.ProcSubst, *syntax.Subshell, *syntax.Block,
+		*syntax.IfClause, *syntax.WhileClause, *syntax.ForClause, *syntax.CaseClause,
+		*syntax.FuncDecl:
+		return true
+	}
+	return false
 }
 
 // isCwdChanger returns true if the command name changes the working directory.

