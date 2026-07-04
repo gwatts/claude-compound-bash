@@ -182,14 +182,14 @@ func isAllDigits(s string) bool {
 	return true
 }
 
-// xargsShortOptsWithArg are the single-letter xargs options that consume a
-// following separate argument (e.g. "-n 1", "-I {}"). Covers the union of BSD
-// (macOS) and GNU xargs. Options with an attached value ("-n1", "-I{}") need no
-// special handling — they are a single token and skipped as one.
+// xargsShortOptsWithArg are the single-letter xargs options that take a value,
+// either attached in the same token ("-n1") or as the following token ("-n 1").
+// Covers the union of BSD (macOS) and GNU xargs, including BSD's -R (replacements)
+// and -S (replsize).
 var xargsShortOptsWithArg = map[byte]bool{
 	'I': true, 'J': true, 'L': true, 'n': true,
 	'P': true, 's': true, 'E': true, 'a': true,
-	'd': true, 'R': true,
+	'd': true, 'R': true, 'S': true,
 }
 
 // xargsLongOptsWithArg are the GNU long options that consume a following
@@ -220,8 +220,8 @@ func xargsInner(args []string) (Command, bool) {
 			}
 			return Command{}, false
 		case strings.HasPrefix(a, "--"):
-			if xargsOptIsReplace(a) {
-				replace = true
+			if strings.HasPrefix(a, "--replace") {
+				replace = true // input substituted at a placeholder, not appended
 			}
 			// A long option consumes the next token only when it takes a value
 			// and that value isn't already attached via "=".
@@ -230,14 +230,22 @@ func xargsInner(args []string) (Command, bool) {
 			}
 			i++
 		case len(a) > 1 && a[0] == '-':
-			if xargsOptIsReplace(a) {
-				replace = true
-			}
-			// Short option(s). A separate argument is consumed only when the
-			// option is written bare (e.g. "-n 1"); attached forms ("-n1",
-			// "-I{}") and boolean clusters ("-0", "-rt") are one token.
-			if len(a) == 2 && xargsShortOptsWithArg[a[1]] {
-				i++ // skip the option's separate argument
+			// Short-option token, possibly a cluster like "-rt0" or "-0n". Scan
+			// the option characters: a value-taking option consumes the rest of
+			// the token when a value is attached ("-n1", "-0n1"), or the next
+			// token when it ends the cluster ("-n 1", "-0n 1"), and terminates the
+			// option scan (the remainder is that option's value, not more options).
+			for k := 1; k < len(a); k++ {
+				c := a[k]
+				if c == 'I' || c == 'J' || c == 'i' {
+					replace = true // -I/-J/-i select replace mode
+				}
+				if xargsShortOptsWithArg[c] {
+					if k == len(a)-1 {
+						i++ // the option's value is the following token
+					}
+					break
+				}
 			}
 			i++
 		default:
@@ -245,23 +253,6 @@ func xargsInner(args []string) (Command, bool) {
 		}
 	}
 	return Command{}, false
-}
-
-// xargsOptIsReplace reports whether an xargs option selects replace mode, where
-// input is substituted at a placeholder instead of appended: -I/-J (with a
-// replstr), the deprecated -i, and the long --replace, in bare or attached form.
-// It is deliberately conservative — anything it doesn't recognize is treated as
-// append mode, which is the safe default (it demands a trailing-tolerant rule).
-func xargsOptIsReplace(a string) bool {
-	switch {
-	case strings.HasPrefix(a, "--replace"):
-		return true
-	case a == "-I" || a == "-J" || a == "-i":
-		return true
-	case len(a) > 2 && a[0] == '-' && (a[1] == 'I' || a[1] == 'J' || a[1] == 'i'):
-		return true
-	}
-	return false
 }
 
 // xargsCommand builds the command xargs will run, flagging it as receiving

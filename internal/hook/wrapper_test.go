@@ -164,6 +164,22 @@ func TestWrapperXargsAppendedArgsDenyStillWins(t *testing.T) {
 	assert.Equal(t, ResultDenyRule, result.Kind)
 }
 
+func TestWrapperXargsClusteredOptionsDenyStillWins(t *testing.T) {
+	// Clustered short options with a value-taking option (e.g. -0n 1, -S 999)
+	// must not hide the payload: the deny on the real inner command still fires.
+	deny := patterns("Bash(rm:*)")
+	for _, cmd := range []string{
+		`printf 'x\0' | xargs -0n 1 rm -rf`,
+		`printf 'x\0' | xargs -0n1 rm -rf`,
+		`printf 'x\n' | xargs -rn 1 rm -rf`,
+		`printf 'x\n' | xargs -S 999 rm -rf`,
+		`printf 'x\0' | xargs -0S 4096 rm -rf`,
+	} {
+		result := Process(bash(cmd), nil, nil, deny, nil, nopLog())
+		assert.Equalf(t, ResultDenyRule, result.Kind, "cmd: %s (%s)", cmd, result.Reason)
+	}
+}
+
 func TestWrapperDenyPayloadBeyondDepthLimitStillDenied(t *testing.T) {
 	// Regression: a denied payload nested past maxWrapperDepth must still be
 	// cancelled, not downgraded to an ask. The deny traversal is exhaustive, so

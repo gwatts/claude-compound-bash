@@ -32,6 +32,14 @@ func TestWrapperInnerXargs(t *testing.T) {
 		{"long opt with equals", "xargs --max-args=5 grep x", []string{"grep"}},
 		{"long opt separate arg", "xargs --max-args 5 grep x", []string{"grep"}},
 		{"dangerous payload still extracted", "xargs rm -rf", []string{"rm"}},
+		// Clustered short options with a value-taking option at the end: the value
+		// may be attached ("-0n1") or the following token ("-0n 1"). Either way the
+		// command is what follows, not the option value.
+		{"cluster attached value", "xargs -0n1 rm -rf", []string{"rm"}},
+		{"cluster separate value", "xargs -0n 1 rm -rf", []string{"rm"}},
+		{"cluster boolean then count", "xargs -rn 1 grep x", []string{"grep"}},
+		{"bsd replsize separate", "xargs -S 999 rm -rf", []string{"rm"}},
+		{"bsd replsize cluster", "xargs -0S 4096 rm", []string{"rm"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
