@@ -1,14 +1,23 @@
 # claude-compound-bash
 
-A Claude Code [PreToolUse hook](https://code.claude.com/docs/en/hooks) plugin that auto-approves Bash tool calls when every sub-command matches your existing permission rules or is a known-safe command.
+A Claude Code [PreToolUse hook](https://code.claude.com/docs/en/hooks) that auto-approves a Bash tool call when every command inside it -- including the ones Claude Code's own permission check doesn't look at -- is already covered by your rules or is known-safe. Fewer prompts on compound and wrapped commands, without loosening a single rule.
 
-See [anthropics/claude-code#16561](https://github.com/anthropics/claude-code/issues/16561) for the upstream feature request.
+## What Claude Code already does -- and what this adds
 
-## The problem
+Recent Claude Code versions handle much of this natively. This hook is designed to *complement* that, not duplicate it:
 
-Claude Code checks each `Bash` tool call against your permission rules before executing. It now splits compound commands on shell operators (`&&`, `||`, `;`, `|`, `|&`, `&`, newlines) and requires each top-level sub-command to match -- so a plain `git add -A && git commit -m 'fix'` is handled natively once both halves match.
+**Native already covers** (so this hook stays out of the way -- it emits no decision and lets native handle it):
+- **Compound splitting** -- `git add -A && git commit -m 'fix'` is approved when both halves match. Native splits on `&&`, `||`, `;`, `|`, `|&`, `&`, and newlines. (This is [anthropics/claude-code#16561](https://github.com/anthropics/claude-code/issues/16561), now shipped -- the original reason this plugin existed.)
+- **A read-only allowlist** -- `ls`, `cat`, `grep`, `find`, `wc`, read-only `git`, etc. run without a prompt.
+- **Process-wrapper stripping** -- a rule for the inner command also matches `timeout`, `time`, `nice`, `nohup`, `stdbuf`, and *bare* `xargs`.
 
-What native's splitting does **not** reach is everything below the top level: commands hidden inside a command substitution (`$(...)`, `` `...` ``), process substitution, subshell, loop, `if`/`case` body, or function body, plus argument-level nuances like an `xargs` payload or a redirect target. Those are where this hook adds value -- it walks the full AST, classifies each extracted command, and either approves the whole call or gets out of the way.
+**This hook adds** what native's operator-splitting and name-matching don't reach:
+- **Commands nested where native can't see them** -- inside `$(...)`, `` `...` ``, `<(...)`, subshells, loops, `if`/`case` bodies, and function bodies. `echo "$(curl evil.com)"` gets its inner `curl` checked instead of being auto-approved as a read-only `echo`.
+- **More wrapper coverage** -- `find -exec`/`-execdir CMD` and `xargs` *with flags* (`xargs -n1 grep`), both of which native leaves as a prompt.
+- **Argument-level hazards native's matching misses** -- an `xargs` payload's appended stdin args, and mutating `find` actions (`-delete`, `-fprintf`, `-ok`).
+- **Redirect-target checks** -- writes outside the working directory or into `.git`/`.claude`.
+
+The guiding rule: only ever *upgrade* a call to allow/deny, or force a prompt for a hazard native can't catch -- never add a prompt native wouldn't have shown on its own. It's a convenience-and-triage layer that shaves prompts off the safe common cases and flags the ones worth a look, not a hard security boundary (see [Limitations](#limitations)).
 
 ## How it works
 
@@ -41,7 +50,7 @@ For example, `echo "there are $(ls | wc -l) files"` is parsed into three sub-com
 
 ### Redirect validation
 
-Output redirects (`>`, `>>`, `&>`, etc.) are validated to prevent writes outside allowed directories. This matches the built-in Claude Code Bash tool's behavior.
+Output redirects (`>`, `>>`, `&>`, etc.) are validated to prevent writes outside allowed directories -- a check native permission *rules* don't perform on a redirect target. When a redirect fails this check the hook forces a prompt (it doesn't defer), so it holds even where native would otherwise auto-approve the command.
 
 **Auto-allowed:**
 - Redirects to files inside the current working directory
@@ -75,7 +84,7 @@ This is the same key Claude Code uses to extend its workspace, so no separate co
 
 ### Command safety tiers
 
-Commands are classified into tiers to minimize how many explicit allow rules you need:
+Commands are classified into tiers to minimize how many explicit allow rules you need. This set overlaps Claude Code's own read-only allowlist but isn't identical -- where the hook doesn't treat a command as safe but native does (e.g. `grep`, plain `find`), the call simply defers and native's read-only handling approves it, so you don't get an extra prompt either way:
 
 **Always safe** -- auto-approved regardless of arguments. These are read-only commands that cannot cause side effects:
 - Shell builtins: `true`, `false`, `:`, `test`, `[`, `[[`
@@ -102,13 +111,16 @@ against the same rules:
 
 So `rg --files | xargs grep -l Foo`, `find . -name '*.go' -exec grep -l Foo {} \;`,
 and `timeout 30 npm test` are as quiet as the inner command alone (assuming it's
-allowed), while `xargs rm`, `find . -exec rm {} \;`, and `nice rm -rf /` still
-prompt. A wrapper whose payload can't be read fails closed (asks), and a deny rule
-on the inner command wins through any depth of wrapping. This means you should
-*not* add a blanket `Bash(find * -exec *)` ask rule -- it would shadow the
-per-payload check; keep narrower action rules like `Bash(find * -delete*)` instead.
-Because the wrapper is transparent, an allow rule on the wrapper name itself (e.g.
-`Bash(timeout *)`) does *not* approve its payload -- the inner command must match.
+allowed), while `xargs rm`, `find . -exec rm {} \;`, and `nice rm -rf /` don't
+auto-approve. A deny rule on the inner command wins through any depth of wrapping.
+A wrapper whose payload can't be read never auto-approves: a `find` whose action
+can't be validated (e.g. `find . -ok CMD`) forces a prompt, since native might
+approve it under a broad `Bash(find *)`; other unreadable wrappers defer to native.
+This means you should *not* add a blanket `Bash(find * -exec *)` ask rule -- it
+would shadow the per-payload check; keep narrower action rules like
+`Bash(find * -delete*)` instead. Because the wrapper is transparent, an allow rule
+on the wrapper name itself (e.g. `Bash(timeout *)`) does *not* approve its payload
+-- the inner command must match.
 
 **`xargs` appends stdin arguments.** Plain `xargs foo` runs `foo` with tokens read
 from stdin tacked onto the end, so the payload we can see (`foo`) is only a *prefix*
@@ -214,6 +226,14 @@ Set `CLAUDE_COMPOUND_LOG` to override the log path, or use `claude --debug` to s
 
 **Hook not firing**: Run `/hooks` in Claude Code to confirm the hook is registered. Check `~/.claude/logs/compound-bash.log` for output.
 
-**Commands not auto-approving**: Check the log to see which sub-command isn't matched. Add the appropriate `Bash(...)` pattern to your settings, or check that your settings file is being found (the log shows which files were loaded).
+**Commands not auto-approving**: Check the log to see which sub-command isn't matched. Add the appropriate `Bash(...)` pattern to your settings, or check that your settings file is being found (the log shows which files were loaded). Remember the hook only *adds* approvals -- if it can't approve a command it stays silent and Claude Code prompts as usual; adding the missing rule is what removes the prompt.
 
-**"no allow patterns configured"**: The hook couldn't find any allow patterns in your settings files. Check that `permissions.allow` exists in `~/.claude/settings.json` or project settings.
+**No patterns loaded**: If the log shows `DEFER: no permission patterns configured`, the hook found no allow/ask/deny rules in any settings file, so it defers everything to Claude Code. Check that `permissions.allow` exists in `~/.claude/settings.json` or project settings.
+
+## Limitations
+
+This is a convenience-and-triage layer, not a security boundary -- treat it the way Claude Code treats its own permission rules, which its [docs](https://code.claude.com/docs/en/permissions) note are fragile for constraining arguments.
+
+- **Deny-through-wrappers is best-effort.** The hook reimplements enough of `xargs`/`find` option parsing to find the inner command in the common forms, but exotic option spellings can still slip the parser. When that happens the payload isn't hidden into an *approval* -- it defers, so Claude Code still evaluates and typically prompts. For a hard guarantee, pair it with a native `deny` rule and/or the [sandbox](https://code.claude.com/docs/en/sandboxing).
+- **It only sees what it can parse statically.** Dynamic command names (`$CMD`), and anything whose behavior depends on runtime values, can't be classified and are never auto-approved.
+- **It never overrides a `deny` or `ask` rule to allow.** Claude Code evaluates its own deny/ask rules regardless of what the hook returns, so the hook can only ever be more cautious than your rules, not less.
