@@ -11,6 +11,7 @@ import "strings"
 //   - xargs [opts] CMD ...                runs CMD with stdin-derived args
 //   - find ... -exec CMD ... {} ;|+       runs CMD for each match
 //   - find ... -execdir CMD ... {} ;|+    same, in each match's directory
+//   - timeout/nice/nohup/stdbuf [opts] CMD ...   run CMD as an exec prefix
 //
 // isWrapper is true whenever cmd is one of these recognized forms that must be
 // gated on its payload rather than auto-allowed by its own name. When isWrapper
@@ -20,6 +21,12 @@ import "strings"
 //
 // Plain find with no -exec/-execdir is NOT a wrapper: it's a read-only search
 // handled by the caller's normal rules, so isWrapper is false for it.
+//
+// bash's `time` reserved word is not listed here: the parser represents it as a
+// TimeClause and yields the inner command directly, so `time CMD` never reaches
+// us as a command named "time". (An external `/usr/bin/time` is a distinct
+// command name and is deliberately not unwrapped, matching Claude Code, which
+// strips only the bare `time` keyword.)
 func WrapperInner(cmd Command) (inners []Command, isWrapper bool) {
 	if cmd.Dynamic || len(cmd.Args) == 0 {
 		return nil, false
@@ -41,9 +48,138 @@ func WrapperInner(cmd Command) (inners []Command, isWrapper bool) {
 			return nil, false // plain search — defer to normal rules
 		}
 		return findExecInners(cmd.Args), true
+	case "timeout", "nice", "nohup", "stdbuf":
+		if inner, ok := processWrapperInner(cmd.Name, cmd.Args); ok {
+			return []Command{inner}, true
+		}
+		return nil, true // recognized wrapper, payload undeterminable → caller asks
 	}
 
 	return nil, false
+}
+
+// processWrapperInner skips an exec-prefix wrapper's own name and options and
+// returns the command it goes on to run. Each wrapper has its own option grammar
+// (see the per-wrapper skip helpers below). ok is false when no inner command
+// word remains — only options, or an option consumed what would have been the
+// command — so the caller fails closed to an ask.
+//
+// The skip logic errs toward stopping early: if it can't recognize a token as
+// one of the wrapper's own options it treats it as the start of the inner
+// command. A too-early stop only risks classifying a wrapper argument as the
+// command (which then fails its own allow check), never smuggling a real command
+// past the rules.
+func processWrapperInner(name string, args []string) (Command, bool) {
+	i := 1 // args[0] is the wrapper name
+	switch name {
+	case "nohup":
+		// nohup has no value-bearing options; only an optional "--" terminator.
+		if i < len(args) && args[i] == "--" {
+			i++
+		}
+	case "nice":
+		i = skipNiceOpts(args, i)
+	case "stdbuf":
+		i = skipStdbufOpts(args, i)
+	case "timeout":
+		i = skipTimeoutOptsAndDuration(args, i)
+	}
+	if i >= len(args) {
+		return Command{}, false
+	}
+	return commandFromArgs(args[i:]), true
+}
+
+// skipNiceOpts advances past nice's only option, the niceness adjustment, in any
+// of its spellings: "-n N", "-nN", "--adjustment N", "--adjustment=N", and the
+// bare "-N" form. Any other token ends the option run.
+func skipNiceOpts(args []string, i int) int {
+	for i < len(args) {
+		a := args[i]
+		switch {
+		case a == "--":
+			return i + 1
+		case a == "-n" || a == "--adjustment":
+			i += 2 // option + its separate value
+		case strings.HasPrefix(a, "--adjustment="):
+			i++
+		case strings.HasPrefix(a, "-n") && len(a) > 2: // -n10
+			i++
+		case len(a) > 1 && a[0] == '-' && isAllDigits(a[1:]): // -10
+			i++
+		default:
+			return i // start of the inner command
+		}
+	}
+	return i
+}
+
+// skipStdbufOpts advances past stdbuf's -i/-o/-e buffering options, written
+// either attached ("-oL") or separated ("-o L"), plus their --input/--output/
+// --error long forms. Any other token ends the option run.
+func skipStdbufOpts(args []string, i int) int {
+	for i < len(args) {
+		a := args[i]
+		switch {
+		case a == "--":
+			return i + 1
+		case a == "-i" || a == "-o" || a == "-e":
+			i += 2 // option + its separate value
+		case len(a) > 2 && a[0] == '-' && (a[1] == 'i' || a[1] == 'o' || a[1] == 'e'): // -oL
+			i++
+		case a == "--input" || a == "--output" || a == "--error":
+			i += 2
+		case strings.HasPrefix(a, "--input=") || strings.HasPrefix(a, "--output=") ||
+			strings.HasPrefix(a, "--error="):
+			i++
+		default:
+			return i // start of the inner command
+		}
+	}
+	return i
+}
+
+// skipTimeoutOptsAndDuration advances past timeout's options and then the single
+// mandatory DURATION operand, leaving i at the start of the inner command.
+// Options that take a value are -s/--signal and -k/--kill-after; the rest are
+// boolean. The first non-option token is the DURATION and is always skipped.
+func skipTimeoutOptsAndDuration(args []string, i int) int {
+	for i < len(args) {
+		a := args[i]
+		if a == "--" {
+			i++
+			break
+		}
+		if !strings.HasPrefix(a, "-") {
+			break // the DURATION operand
+		}
+		switch a {
+		case "-s", "-k", "--signal", "--kill-after":
+			i += 2 // option + its separate value
+		default:
+			// boolean option, or an attached value ("-sKILL", "--signal=KILL").
+			i++
+		}
+	}
+	// Skip the DURATION operand (one token). If it isn't present, there is no
+	// inner command either.
+	if i >= len(args) {
+		return len(args)
+	}
+	return i + 1
+}
+
+// isAllDigits reports whether s is non-empty and consists only of ASCII digits.
+func isAllDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := range len(s) {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // xargsShortOptsWithArg are the single-letter xargs options that consume a

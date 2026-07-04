@@ -54,6 +54,63 @@ func TestWrapperInnerXargsNoPayload(t *testing.T) {
 	}
 }
 
+func TestWrapperInnerProcessWrappers(t *testing.T) {
+	tests := []struct {
+		name     string
+		src      string
+		wantName string
+		wantArgs []string
+	}{
+		{"timeout duration", "timeout 30 npm test", "npm", []string{"npm", "test"}},
+		{"timeout signal separate", "timeout -s KILL 30 rm -rf /x", "rm", []string{"rm", "-rf", "/x"}},
+		{"timeout signal attached", "timeout -sKILL 30 grep foo", "grep", []string{"grep", "foo"}},
+		{"timeout kill-after", "timeout -k 5 30 make", "make", []string{"make"}},
+		{"timeout boolean opt", "timeout --preserve-status 5 make", "make", []string{"make"}},
+		{"timeout long signal equals", "timeout --signal=TERM 5 make", "make", []string{"make"}},
+		{"timeout double dash", "timeout -- 30 make", "make", []string{"make"}},
+		{"nice bare", "nice make", "make", []string{"make"}},
+		{"nice -n separate", "nice -n 10 make", "make", []string{"make"}},
+		{"nice -n attached", "nice -n10 make", "make", []string{"make"}},
+		{"nice numeric", "nice -10 make", "make", []string{"make"}},
+		{"nice long adjustment", "nice --adjustment=5 make", "make", []string{"make"}},
+		{"nohup", "nohup ./server --port 80", "./server", []string{"./server", "--port", "80"}},
+		{"nohup double dash", "nohup -- ./server", "./server", []string{"./server"}},
+		{"stdbuf attached", "stdbuf -oL -eL grep foo", "grep", []string{"grep", "foo"}},
+		{"stdbuf separate", "stdbuf -o L grep foo", "grep", []string{"grep", "foo"}},
+		{"stdbuf long", "stdbuf --output=L grep foo", "grep", []string{"grep", "foo"}},
+		{"dangerous payload still extracted", "timeout 5 rm -rf /x", "rm", []string{"rm", "-rf", "/x"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			inners, isWrapper := WrapperInner(parseSingle(t, tt.src))
+			assert.True(t, isWrapper)
+			require.Len(t, inners, 1)
+			assert.Equal(t, tt.wantName, inners[0].Name)
+			assert.Equal(t, tt.wantArgs, inners[0].Args)
+		})
+	}
+}
+
+func TestWrapperInnerProcessWrappersNoPayload(t *testing.T) {
+	// Recognized wrapper, but no inner command word — caller must fail closed.
+	for _, src := range []string{
+		"nohup", "nice", "nice -n 10", "stdbuf -oL", "timeout 30", "timeout -s KILL 30",
+	} {
+		inners, isWrapper := WrapperInner(parseSingle(t, src))
+		assert.True(t, isWrapper, src)
+		assert.Empty(t, inners, src)
+	}
+}
+
+func TestWrapperInnerTimeIsTransparentInParser(t *testing.T) {
+	// bash's `time` reserved word never reaches WrapperInner as a command named
+	// "time"; the parser yields the inner command directly.
+	cmd := parseSingle(t, "time npm test")
+	assert.Equal(t, "npm", cmd.Name)
+	_, isWrapper := WrapperInner(cmd)
+	assert.False(t, isWrapper, "the inner npm command is not itself a wrapper")
+}
+
 func TestWrapperInnerFindExec(t *testing.T) {
 	tests := []struct {
 		name      string
