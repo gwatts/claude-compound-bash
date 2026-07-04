@@ -104,6 +104,16 @@ per-payload check; keep narrower action rules like `Bash(find * -delete*)` inste
 Because the wrapper is transparent, an allow rule on the wrapper name itself (e.g.
 `Bash(timeout *)`) does *not* approve its payload -- the inner command must match.
 
+**`xargs` appends stdin arguments.** Plain `xargs foo` runs `foo` with tokens read
+from stdin tacked onto the end, so the payload we can see (`foo`) is only a *prefix*
+of what actually runs. To avoid approving more than a rule intends, an `xargs`
+payload is auto-approved only by a rule that tolerates arbitrary trailing arguments
+-- a trailing wildcard like `Bash(rm *)` or `Bash(rm /tmp/x*)`. An *exact* rule such
+as `Bash(rm /tmp/x)` does **not** approve `... | xargs rm /tmp/x` (which really runs
+`rm /tmp/x <stdin>`); that defers to Claude Code. Replace mode (`xargs -I{} CMD {}`)
+substitutes at the visible `{}` placeholder instead of appending, so it is matched
+as written, the same as `find -exec`.
+
 This matches Claude Code's built-in wrapper stripping, with two intentional
 differences: this hook also unwraps `xargs` when it carries flags (`xargs -n1
 grep`) and `find -exec`, both of which Claude Code leaves as prompts. bash's `time`

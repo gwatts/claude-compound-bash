@@ -212,7 +212,7 @@ const maxWrapperDepth = 3
 
 // checkCommand determines if a single command is allowed.
 func checkCommand(cmd parser.Command, allowPatterns []matcher.Pattern, askPatterns []matcher.Pattern, denyPatterns []matcher.Pattern, log *logfile.Logger) (commandResult, string) {
-	return checkCommandDepth(cmd, allowPatterns, askPatterns, denyPatterns, log, 0)
+	return checkCommandDepth(cmd, allowPatterns, askPatterns, denyPatterns, log, 0, false)
 }
 
 // denyMatchDeep returns the first command — cmd itself or any command it wraps
@@ -247,7 +247,11 @@ func denyMatchDeep(cmd parser.Command, denyPatterns []matcher.Pattern) (string, 
 	return "", false
 }
 
-func checkCommandDepth(cmd parser.Command, allowPatterns []matcher.Pattern, askPatterns []matcher.Pattern, denyPatterns []matcher.Pattern, log *logfile.Logger, depth int) (commandResult, string) {
+// checkCommandDepth classifies one command. inheritedAppend is true when an
+// enclosing wrapper appends arguments at runtime (an xargs payload), which flows
+// down so the eventual leaf command is only auto-approved by a rule that
+// tolerates those extra arguments.
+func checkCommandDepth(cmd parser.Command, allowPatterns []matcher.Pattern, askPatterns []matcher.Pattern, denyPatterns []matcher.Pattern, log *logfile.Logger, depth int, inheritedAppend bool) (commandResult, string) {
 	// Dynamic command names — can't determine what runs, so we can't allow it.
 	// Defer rather than force a prompt: native evaluates it too.
 	if cmd.Dynamic {
@@ -256,6 +260,9 @@ func checkCommandDepth(cmd parser.Command, allowPatterns []matcher.Pattern, askP
 
 	name := cmd.Name
 	cmdStr := strings.Join(cmd.Args, " ")
+	// This command receives appended runtime args if it's an xargs payload or if
+	// an enclosing wrapper appends to it.
+	appendsArgs := cmd.AppendsArgs || inheritedAppend
 
 	// Evaluation order: deny → ask → allow (first match wins), with deny always
 	// winning — including a deny rule that matches the payload of a wrapper.
@@ -286,7 +293,7 @@ func checkCommandDepth(cmd parser.Command, allowPatterns []matcher.Pattern, askP
 		outerAsk := len(askPatterns) > 0 && matcher.MatchesAny(cmdStr, askPatterns)
 		result, reason := commandAllowed, fmt.Sprintf("%q wraps approved command(s)", name)
 		for _, inner := range inners {
-			res, r := checkCommandDepth(inner, allowPatterns, askPatterns, denyPatterns, log, depth+1)
+			res, r := checkCommandDepth(inner, allowPatterns, askPatterns, denyPatterns, log, depth+1, appendsArgs)
 			switch res {
 			case commandDenied:
 				return commandDenied, fmt.Sprintf("%q wraps denied command: %s", name, r)
@@ -338,7 +345,15 @@ func checkCommandDepth(cmd parser.Command, allowPatterns []matcher.Pattern, askP
 		log.Log("%q is never-auto-allow builtin, checking patterns", name)
 	}
 
-	// Check against allow patterns.
+	// Check against allow patterns. When runtime args will be appended (an xargs
+	// payload), require a rule that tolerates them, so an exact rule can't approve
+	// a command xargs will silently extend with stdin-derived tokens.
+	if appendsArgs {
+		if matcher.MatchesAnyAllowingTrailingArgs(cmdStr, allowPatterns) {
+			return commandAllowed, fmt.Sprintf("matched allow pattern (with appended args) for %q", cmdStr)
+		}
+		return commandDefer, fmt.Sprintf("not in allow list for appended-args command: %q", cmdStr)
+	}
 	if matcher.MatchesAny(cmdStr, allowPatterns) {
 		return commandAllowed, fmt.Sprintf("matched allow pattern for %q", cmdStr)
 	}

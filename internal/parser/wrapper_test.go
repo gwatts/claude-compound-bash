@@ -54,6 +54,49 @@ func TestWrapperInnerXargsNoPayload(t *testing.T) {
 	}
 }
 
+func TestWrapperInnerXargsAppendsArgs(t *testing.T) {
+	tests := []struct {
+		name        string
+		src         string
+		wantAppends bool
+	}{
+		{"plain xargs appends", "xargs rm -rf", true},
+		{"with count flag appends", "xargs -n1 rm", true},
+		{"null-delimited appends", "xargs -0 grep foo", true},
+		{"replace -I substitutes", "xargs -I{} rm {}", false},
+		{"replace -I attached", "xargs -I{} grep {} file", false},
+		{"replace -J substitutes", "xargs -J% cp % dest", false},
+		{"replace deprecated -i", "xargs -i cp {} dest", false},
+		{"replace long form", "xargs --replace=% cp % dest", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			inners, isWrapper := WrapperInner(parseSingle(t, tt.src))
+			assert.True(t, isWrapper)
+			require.Len(t, inners, 1)
+			assert.Equal(t, tt.wantAppends, inners[0].AppendsArgs)
+		})
+	}
+}
+
+func TestWrapperInnerNonXargsDoesNotAppend(t *testing.T) {
+	// find -exec substitutes {} and process wrappers run a static command; none
+	// append invisible runtime tokens, so AppendsArgs stays false.
+	for _, src := range []string{
+		`find . -exec grep X {} \;`,
+		`find . -exec rm {} +`,
+		"timeout 30 rm -rf /x",
+		"nice make",
+	} {
+		inners, isWrapper := WrapperInner(parseSingle(t, src))
+		require.True(t, isWrapper, src)
+		require.NotEmpty(t, inners, src)
+		for _, in := range inners {
+			assert.Falsef(t, in.AppendsArgs, "src %q inner %q", src, in.Name)
+		}
+	}
+}
+
 func TestWrapperInnerProcessWrappers(t *testing.T) {
 	tests := []struct {
 		name     string

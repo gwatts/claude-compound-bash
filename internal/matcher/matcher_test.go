@@ -211,3 +211,31 @@ func TestGlobMatch(t *testing.T) {
 		})
 	}
 }
+
+func TestMatchesAnyAllowingTrailingArgs(t *testing.T) {
+	tests := []struct {
+		name    string
+		command string
+		pattern string
+		want    bool
+	}{
+		// Trailing-wildcard rules tolerate appended args → match.
+		{"trailing glob", "rm /tmp/safe", "Bash(rm *)", true},
+		{"colon wildcard", "rm /tmp/safe", "Bash(rm:*)", true},
+		{"suffix glob no space", "rm /tmp/safe", "Bash(rm /tmp/safe*)", true},
+		{"match-all", "rm /tmp/safe", "Bash(*)", true},
+		{"wildcard on the tail", "grep -l foo", "Bash(grep:*)", true},
+		// Exact rules do NOT tolerate an appended arg → no match.
+		{"exact rule", "rm /tmp/safe", "Bash(rm /tmp/safe)", false},
+		{"exact rule shorter", "rm", "Bash(rm)", false},
+		// A middle/anchored-suffix rule that can't absorb a trailing token.
+		{"anchored suffix", "rm /tmp/safe", "Bash(rm * safe)", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pats := ParsePatterns([]string{tt.pattern})
+			assert.Equal(t, tt.want, MatchesAnyAllowingTrailingArgs(tt.command, pats),
+				"command=%q pattern=%q", tt.command, tt.pattern)
+		})
+	}
+}

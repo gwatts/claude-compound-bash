@@ -118,6 +118,52 @@ func TestProcessWrapperNestedWithOtherWrappers(t *testing.T) {
 	assert.Equal(t, ResultDenyRule, denied.Kind)
 }
 
+func TestWrapperXargsAppendedArgsNotApprovedByExactRule(t *testing.T) {
+	// xargs appends stdin-derived tokens to the payload, so `xargs rm /tmp/safe`
+	// really runs `rm /tmp/safe <stdin...>`. An exact allow rule for the static
+	// form must NOT approve it — otherwise a narrow rule would green-light deleting
+	// files it never named. The hook defers so native prompts.
+	exact := patterns("Bash(rm /tmp/safe)")
+	deferCases := []string{
+		`printf '/tmp/important\n' | xargs rm /tmp/safe`,
+		`printf '/tmp/important\n' | xargs -n1 rm /tmp/safe`, // flagged: native wouldn't strip this
+		`printf 'x\n' | xargs timeout 5 rm /tmp/safe`,        // append flag propagates through timeout
+	}
+	for _, cmd := range deferCases {
+		result := Process(bash(cmd), exact, nil, nil, nil, nopLog())
+		assert.Equalf(t, ResultDefer, result.Kind, "cmd: %s (%s)", cmd, result.Reason)
+	}
+
+	// A trailing-wildcard rule DOES tolerate the appended args, so it still allows
+	// — the `xargs grep` quality-of-life case is preserved.
+	wild := patterns("Bash(rm /tmp/safe*)", "Bash(grep:*)", "Bash(rg:*)")
+	for _, cmd := range []string{
+		`printf '/tmp/important\n' | xargs rm /tmp/safe`,
+		`rg --files | xargs grep -l foo`,
+		`rg --files | xargs -n1 grep -l foo`,
+	} {
+		result := Process(bash(cmd), wild, nil, nil, nil, nopLog())
+		assert.Equalf(t, ResultAllowed, result.Kind, "cmd: %s (%s)", cmd, result.Reason)
+	}
+}
+
+func TestWrapperXargsReplaceModeUsesStaticMatch(t *testing.T) {
+	// In -I/-J replace mode xargs substitutes at a visible placeholder instead of
+	// appending, so the static command is matched as-is (like find -exec {}).
+	allow := patterns("Bash(grep {} file)")
+	// printf is an inert safe builtin, so only the grep payload needs a rule.
+	result := Process(bash(`printf 'x\n' | xargs -I{} grep {} file`), allow, nil, nil, nil, nopLog())
+	assert.Equalf(t, ResultAllowed, result.Kind, "reason: %s", result.Reason)
+}
+
+func TestWrapperXargsAppendedArgsDenyStillWins(t *testing.T) {
+	// Deny still matches the static form, so a denied payload is cancelled
+	// regardless of the appended-args handling.
+	deny := patterns("Bash(rm:*)")
+	result := Process(bash(`printf 'x\n' | xargs rm /tmp/safe`), nil, nil, deny, nil, nopLog())
+	assert.Equal(t, ResultDenyRule, result.Kind)
+}
+
 func TestWrapperDenyPayloadBeyondDepthLimitStillDenied(t *testing.T) {
 	// Regression: a denied payload nested past maxWrapperDepth must still be
 	// cancelled, not downgraded to an ask. The deny traversal is exhaustive, so

@@ -20,6 +20,12 @@ type Command struct {
 	Raw string
 	// Dynamic is true if the command name cannot be statically determined.
 	Dynamic bool
+	// AppendsArgs is true when this command will receive one or more additional
+	// arguments at runtime that are not visible in Args — specifically an xargs
+	// payload in append mode, which tacks stdin-derived tokens onto the end. A
+	// command flagged this way must only be auto-approved by an allow rule that
+	// tolerates arbitrary trailing arguments, never by an exact rule.
+	AppendsArgs bool
 }
 
 // ParseResult contains all information extracted from parsing a command.

@@ -203,18 +203,26 @@ var xargsLongOptsWithArg = map[string]bool{
 // xargsInner skips xargs's own options and returns the wrapped command. ok is
 // false when no command word can be identified (only options, or an option
 // swallowed what would have been the command — both fail closed to an ask).
+//
+// The returned command's AppendsArgs is set unless xargs is in replace mode
+// (-I/-J/-i/--replace), in which case stdin is substituted at a placeholder
+// rather than appended to the end.
 func xargsInner(args []string) (Command, bool) {
 	i := 1 // args[0] == "xargs"
+	replace := false
 	for i < len(args) {
 		a := args[i]
 		switch {
 		case a == "--":
 			i++
 			if i < len(args) {
-				return commandFromArgs(args[i:]), true
+				return xargsCommand(args[i:], replace), true
 			}
 			return Command{}, false
 		case strings.HasPrefix(a, "--"):
+			if xargsOptIsReplace(a) {
+				replace = true
+			}
 			// A long option consumes the next token only when it takes a value
 			// and that value isn't already attached via "=".
 			if !strings.ContainsRune(a, '=') && xargsLongOptsWithArg[a] {
@@ -222,6 +230,9 @@ func xargsInner(args []string) (Command, bool) {
 			}
 			i++
 		case len(a) > 1 && a[0] == '-':
+			if xargsOptIsReplace(a) {
+				replace = true
+			}
 			// Short option(s). A separate argument is consumed only when the
 			// option is written bare (e.g. "-n 1"); attached forms ("-n1",
 			// "-I{}") and boolean clusters ("-0", "-rt") are one token.
@@ -230,10 +241,35 @@ func xargsInner(args []string) (Command, bool) {
 			}
 			i++
 		default:
-			return commandFromArgs(args[i:]), true
+			return xargsCommand(args[i:], replace), true
 		}
 	}
 	return Command{}, false
+}
+
+// xargsOptIsReplace reports whether an xargs option selects replace mode, where
+// input is substituted at a placeholder instead of appended: -I/-J (with a
+// replstr), the deprecated -i, and the long --replace, in bare or attached form.
+// It is deliberately conservative — anything it doesn't recognize is treated as
+// append mode, which is the safe default (it demands a trailing-tolerant rule).
+func xargsOptIsReplace(a string) bool {
+	switch {
+	case strings.HasPrefix(a, "--replace"):
+		return true
+	case a == "-I" || a == "-J" || a == "-i":
+		return true
+	case len(a) > 2 && a[0] == '-' && (a[1] == 'I' || a[1] == 'J' || a[1] == 'i'):
+		return true
+	}
+	return false
+}
+
+// xargsCommand builds the command xargs will run, flagging it as receiving
+// appended arguments unless xargs is in replace mode.
+func xargsCommand(args []string, replace bool) Command {
+	c := commandFromArgs(args)
+	c.AppendsArgs = !replace
+	return c
 }
 
 // findHasExec reports whether a find argument list contains an -exec/-execdir
