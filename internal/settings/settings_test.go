@@ -73,6 +73,46 @@ func TestLoadPermissionsNoPermissionsKey(t *testing.T) {
 	assert.NotNil(t, perms)
 }
 
+func TestLoadPermissionsHonorsCLAUDE_CONFIG_DIR(t *testing.T) {
+	// When CLAUDE_CONFIG_DIR is set, the loader should read user settings from
+	// there rather than ~/.claude. This mirrors how Claude Code itself resolves
+	// the config dir for profile switching (e.g. ~/.claude-work).
+	configDir := t.TempDir()
+	require.NoError(t, os.WriteFile(
+		filepath.Join(configDir, "settings.json"),
+		[]byte(`{"permissions": {"allow": ["Bash(profile-only-marker:*)"]}}`),
+		0600,
+	))
+	t.Setenv("CLAUDE_CONFIG_DIR", configDir)
+	t.Setenv("CLAUDE_PROJECT_DIR", "")
+
+	perms, err := LoadPermissions()
+	require.NoError(t, err)
+	assert.Contains(t, perms.Allow, "Bash(profile-only-marker:*)")
+}
+
+func TestLoadPermissionsFallsBackToDefaultHome(t *testing.T) {
+	// With CLAUDE_CONFIG_DIR unset, the loader must fall back to ~/.claude
+	// so users on the default profile see no behavior change.
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	t.Setenv("CLAUDE_PROJECT_DIR", "")
+
+	// Override HOME so the test doesn't depend on the developer's real ~/.claude.
+	fakeHome := t.TempDir()
+	claudeDir := filepath.Join(fakeHome, ".claude")
+	require.NoError(t, os.MkdirAll(claudeDir, 0700))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(claudeDir, "settings.json"),
+		[]byte(`{"permissions": {"allow": ["Bash(fallback-marker:*)"]}}`),
+		0600,
+	))
+	t.Setenv("HOME", fakeHome)
+
+	perms, err := LoadPermissions()
+	require.NoError(t, err)
+	assert.Contains(t, perms.Allow, "Bash(fallback-marker:*)")
+}
+
 func TestLoadPermissionsInvalidJSON(t *testing.T) {
 	projectDir := t.TempDir()
 	claudeDir := filepath.Join(projectDir, ".claude")
