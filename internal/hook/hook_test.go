@@ -486,6 +486,56 @@ func TestProcessRedirectOutsideCwd(t *testing.T) {
 	assert.Contains(t, result.Reason, "outside allowed directories")
 }
 
+// Case A: a non-inert, non-allow-matched command with an unsafe redirect must
+// DEFER, not force a prompt. Native sees the unmatched command and validates the
+// redirect target (and runs its classifier) itself.
+func TestProcessRedirectUnmatchedCommandDefers(t *testing.T) {
+	cases := []struct {
+		name string
+		cmd  string
+	}{
+		{"outside cwd", "node build.js > /etc/passwd"},
+		{"dynamic target", "node build.js > $OUT"},
+		{"tilde", "node build.js > ~/out.txt"},
+		{"protected git", "node build.js > .git/config"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			input := &HookInput{
+				ToolName:  "Bash",
+				ToolInput: ToolInput{Command: tc.cmd},
+				Cwd:       "/tmp/project",
+			}
+			result := Process(input, patterns(), nil, nil, nil, nopLog())
+			assert.Equal(t, ResultDefer, result.Kind, "unsafe redirect on unmatched command should defer")
+		})
+	}
+}
+
+// Case B: once the command is allow-matched the hook is about to suppress
+// native's flow, so the same unsafe redirects force a prompt.
+func TestProcessRedirectAllowedCommandAsks(t *testing.T) {
+	cases := []struct {
+		name string
+		cmd  string
+	}{
+		{"outside cwd", "node build.js > /etc/passwd"},
+		{"dynamic target", "node build.js > $OUT"},
+		{"protected git", "node build.js > .git/config"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			input := &HookInput{
+				ToolName:  "Bash",
+				ToolInput: ToolInput{Command: tc.cmd},
+				Cwd:       "/tmp/project",
+			}
+			result := Process(input, patterns("Bash(node:*)"), nil, nil, nil, nopLog())
+			assert.Equal(t, ResultAsk, result.Kind, "unsafe redirect on allowed command should ask")
+		})
+	}
+}
+
 func TestProcessRedirectDynamicTarget(t *testing.T) {
 	input := &HookInput{
 		ToolName:  "Bash",
@@ -746,17 +796,32 @@ func TestProcessCdWithAbsoluteRedirect(t *testing.T) {
 }
 
 // Regression test: ln can create symlink that redirects to arbitrary location.
-// "ln -s /etc out && echo x > out/passwd" would write to /etc/passwd.
+// "ln -s /etc out && echo x > out/passwd" would write to /etc/passwd. When ln
+// and echo are allow-matched the hook is about to suppress native's flow, so the
+// unsafe relative redirect must force a prompt rather than be auto-allowed.
 func TestProcessLnWithRelativeRedirect(t *testing.T) {
 	input := &HookInput{
 		ToolName:  "Bash",
 		ToolInput: ToolInput{Command: "ln -s /etc out && echo x > out/passwd"},
 		Cwd:       "/tmp/project",
 	}
-	result := Process(input, patterns(), nil, nil, nil, nopLog())
+	result := Process(input, patterns("Bash(ln:*)", "Bash(echo:*)"), nil, nil, nil, nopLog())
 	assert.Equal(t, ResultAsk, result.Kind)
 	assert.Contains(t, result.Reason, "relative redirect")
 	assert.Contains(t, result.Reason, "path-mutating")
+}
+
+// When the command is not allow-matched, an unsafe redirect defers rather than
+// forcing a prompt: native still sees the unmatched command and validates the
+// redirect target itself, so the hook stays additive.
+func TestProcessLnWithRelativeRedirectNotAllowed(t *testing.T) {
+	input := &HookInput{
+		ToolName:  "Bash",
+		ToolInput: ToolInput{Command: "ln -s /etc out && echo x > out/passwd"},
+		Cwd:       "/tmp/project",
+	}
+	result := Process(input, patterns(), nil, nil, nil, nopLog())
+	assert.Equal(t, ResultDefer, result.Kind, "unsafe redirect on unmatched command defers to native")
 }
 
 // Regression test: ln with absolute redirect should still work.

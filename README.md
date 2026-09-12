@@ -29,7 +29,7 @@ For each tool call, the hook returns one of four outcomes:
 
 - **`allow`** -- every sub-command is either a known-safe command or matches an allow pattern. The command runs without prompting.
 - **`deny`** -- a sub-command matches an explicit deny pattern. The tool call is cancelled outright and Claude receives feedback explaining why.
-- **`ask`** -- a sub-command matches an ask pattern, or a redirect fails a safety check that Claude Code doesn't perform itself. The hook forces Claude Code's permission prompt.
+- **`ask`** -- a sub-command matches an ask pattern, or an *otherwise-allowed* command has an output redirect that fails a safety check. The hook forces Claude Code's permission prompt.
 - **defer** (no decision) -- the hook can't affirmatively approve a *top-level* command, but native's own splitting sees the same command, so the hook stays silent and lets Claude Code decide. Implemented the documented way: exit 0 with empty stdout.
 
 Defer keeps the hook **additive** for top-level commands -- it only *upgrades* those to `allow`/`deny` and never adds a prompt native wouldn't have shown. But it defers only where native is known to see the same command. Where the hook detects a hazard native's own matching can't be trusted to enforce, it forces `ask` instead:
@@ -50,7 +50,9 @@ For example, `echo "there are $(ls | wc -l) files"` is parsed into three sub-com
 
 ### Redirect validation
 
-Output redirects (`>`, `>>`, `&>`, etc.) are validated to prevent writes outside allowed directories -- a check native permission *rules* don't perform on a redirect target. When a redirect fails this check the hook forces a prompt (it doesn't defer), so it holds even where native would otherwise auto-approve the command.
+Output redirects (`>`, `>>`, `&>`, etc.) are validated to prevent writes outside allowed directories. This matters because a *narrow allow rule* (e.g. `Bash(echo:*)`) auto-approves the whole call, redirect included, without Claude Code inspecting the target -- so `echo x > /etc/passwd` would slip through.
+
+The check therefore only forces a prompt when the command **would otherwise be allowed** by this hook (an allow-matched or known-safe command). In that case allowing suppresses native's own redirect validation, so the hook stands in for it and asks. When the command *isn't* allow-matched, the hook **defers** instead of asking: it hands the command to Claude Code, which runs its own redirect validation (against your `Edit` rules, protected paths, and working directories) and its classifier. This keeps the hook additive -- it never adds a redirect prompt in a case where native would have vetted the target itself.
 
 **Auto-allowed:**
 - Redirects to files inside the current working directory
@@ -59,7 +61,7 @@ Output redirects (`>`, `>>`, `&>`, etc.) are validated to prevent writes outside
 - FD-to-FD duplications: `2>&1`, `>&2`
 - Heredocs and here-strings: `<<EOF`, `<<<`
 
-**Requires confirmation:**
+**Requires confirmation** (when the command would otherwise be allowed; deferred to Claude Code otherwise)**:**
 - Redirects outside the working directory (unless in `additionalDirectories`)
 - Protected paths: `.git/` and `.claude/` directories at any nesting level
 - Dynamic targets: `> $FILE`, `> ~/file`, `> *.log`, extglob patterns

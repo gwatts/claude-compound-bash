@@ -44,8 +44,12 @@ type ResultKind int
 
 const (
 	// ResultAsk means the hook actively wants Claude Code to prompt: a command
-	// matched an explicit ask rule, or a redirect failed a safety check that the
-	// native permission system doesn't perform. The hook emits an "ask" decision.
+	// matched an explicit ask rule, or an otherwise-allowed command has an unsafe
+	// output redirect. In the redirect case the prompt is only forced when the
+	// command would otherwise be ALLOWED — allowing suppresses native's own
+	// redirect validation, so the hook stands in for it. If the command isn't
+	// allow-matched the hook defers instead, letting native validate the redirect.
+	// The hook emits an "ask" decision.
 	ResultAsk ResultKind = iota
 	// ResultAllowed means all commands matched allow rules or were inert.
 	ResultAllowed
@@ -144,10 +148,19 @@ func Process(input *HookInput, allowPatterns []matcher.Pattern, askPatterns []ma
 	// If command contains cwd-changers or link creators, relative paths can't be trusted
 	hasPathMutator := parseResult.HasCwdChanger || parseResult.HasLinkCreator
 
+	// An unsafe output redirect means we cannot affirmatively ALLOW the command:
+	// allowing short-circuits Claude Code's own redirect validation (a narrow
+	// allow rule bypasses both the classifier and the native redirect check). But
+	// we don't force a prompt on that basis alone. If the command isn't
+	// allow-matched we defer, letting native's redirect validation and classifier
+	// see it. Only when the command would otherwise be allowed do we downgrade to
+	// ask — see the aggregation below. Capture the first unsafe redirect here.
+	var unsafeRedirect *Result
 	for _, redir := range parseResult.Redirects {
 		result := checkRedirect(redir, input.Cwd, expandedDirs, hasPathMutator, log)
-		if result.Kind != ResultAllowed {
-			return result
+		if result.Kind != ResultAllowed && unsafeRedirect == nil {
+			r := result
+			unsafeRedirect = &r
 		}
 	}
 
@@ -198,10 +211,25 @@ func Process(input *HookInput, allowPatterns []matcher.Pattern, askPatterns []ma
 		}
 	}
 
+	// Fold in any unsafe redirect. It blocks ALLOW: if the command would
+	// otherwise be allowed, downgrade to ask, because allowing removes native's
+	// chance to validate the redirect target. If the command already asks or
+	// defers, leave that — an ask still prompts, and a defer hands both the
+	// command and its redirect to native (which does check redirect targets) plus
+	// the classifier. This keeps the hook additive: it only forces a redirect
+	// prompt native wouldn't have shown when it's about to suppress native's flow.
+	if unsafeRedirect != nil && worst == ResultAllowed {
+		log.Log("ASK: unsafe redirect on otherwise-allowed command: %s", unsafeRedirect.Reason)
+		worst, worstReason, worstBlocked = ResultAsk, unsafeRedirect.Reason, unsafeRedirect.BlockedCommand
+	}
+
 	if worst == ResultAllowed {
 		reason := fmt.Sprintf("all %d sub-command(s) matched", len(commands))
 		log.Log("ALLOW: %s", reason)
 		return Result{Kind: ResultAllowed, Reason: reason}
+	}
+	if unsafeRedirect != nil && worst == ResultDefer {
+		log.Log("DEFER: unsafe redirect, but command not allow-matched; native validates the target")
 	}
 	return Result{Kind: worst, Reason: worstReason, BlockedCommand: worstBlocked}
 }
@@ -476,7 +504,7 @@ func checkRedirect(redir parser.RedirectInfo, cwd string, additionalDirs []strin
 
 	// Dynamic targets (variables, globs, tilde) require ask
 	if !redir.TargetLiteral {
-		log.Log("ASK [%s]: dynamic redirect target", redir.Raw)
+		log.Log("unsafe redirect [%s]: dynamic target", redir.Raw)
 		return Result{
 			Kind:           ResultAsk,
 			Reason:         fmt.Sprintf("redirect target is dynamic: %q", redir.Raw),
@@ -493,7 +521,7 @@ func checkRedirect(redir parser.RedirectInfo, cwd string, additionalDirs []strin
 	// If command contains path-mutating commands (cd, pushd, popd, ln), relative paths
 	// cannot be validated reliably - we don't know the effective target at execution time.
 	if hasPathMutator && !filepath.IsAbs(redir.Target) {
-		log.Log("ASK [%s]: relative path with path-mutating command", redir.Raw)
+		log.Log("unsafe redirect [%s]: relative path with path-mutating command", redir.Raw)
 		return Result{
 			Kind:           ResultAsk,
 			Reason:         fmt.Sprintf("relative redirect with path-mutating command (cd/ln/etc): %q", redir.Raw),
@@ -504,7 +532,7 @@ func checkRedirect(redir parser.RedirectInfo, cwd string, additionalDirs []strin
 	// Resolve the path (handling symlinks)
 	resolved, err := parser.ResolvePath(redir.Target, cwd)
 	if err != nil {
-		log.Log("ASK [%s]: cannot resolve path: %v", redir.Raw, err)
+		log.Log("unsafe redirect [%s]: cannot resolve path: %v", redir.Raw, err)
 		return Result{
 			Kind:           ResultAsk,
 			Reason:         fmt.Sprintf("cannot resolve redirect path: %q", redir.Target),
@@ -514,7 +542,7 @@ func checkRedirect(redir parser.RedirectInfo, cwd string, additionalDirs []strin
 
 	// Check for protected paths inside cwd (.git, .claude)
 	if parser.IsProtectedPath(resolved, cwd) {
-		log.Log("ASK [%s]: protected directory (resolved to %s)", redir.Raw, resolved)
+		log.Log("unsafe redirect [%s]: protected directory (resolved to %s)", redir.Raw, resolved)
 		return Result{
 			Kind:           ResultAsk,
 			Reason:         fmt.Sprintf("redirect to protected directory: %q (resolved to %s)", redir.Target, resolved),
@@ -529,7 +557,7 @@ func checkRedirect(redir parser.RedirectInfo, cwd string, additionalDirs []strin
 	}
 
 	// Path is outside allowed directories - ask
-	log.Log("ASK [%s]: output outside allowed directories (resolved to %s)", redir.Raw, resolved)
+	log.Log("unsafe redirect [%s]: output outside allowed directories (resolved to %s)", redir.Raw, resolved)
 	return Result{
 		Kind:           ResultAsk,
 		Reason:         fmt.Sprintf("redirect outside allowed directories: %q (resolved to %s)", redir.Target, resolved),
