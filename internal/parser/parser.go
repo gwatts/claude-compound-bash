@@ -184,14 +184,22 @@ func isLinkCreator(name string) bool {
 // extractRedirect extracts redirect information from an AST Redirect node.
 func extractRedirect(redir *syntax.Redirect, printer *syntax.Printer) RedirectInfo {
 	info := RedirectInfo{
-		Op:  redir.Op,
-		Raw: printNode(printer, redir),
+		Op: redir.Op,
 	}
 
 	// Extract FD number if present (e.g., "2" in "2>&1")
 	if redir.N != nil {
 		info.FD = redir.N.Value
 	}
+
+	// The mvdan.cc/sh printer cannot serialize a bare *syntax.Redirect node,
+	// so reconstruct the redirect's source text from its parts (fd, operator,
+	// target word) rather than printing the node directly.
+	word := ""
+	if redir.Word != nil {
+		word = wordToString(redir.Word, printer)
+	}
+	info.Raw = info.FD + info.Op.String() + word
 
 	// Heredocs (<<, <<-) and here-strings (<<<) have no file path target
 	switch redir.Op {
@@ -202,7 +210,7 @@ func extractRedirect(redir *syntax.Redirect, printer *syntax.Printer) RedirectIn
 
 	// Extract target path/fd
 	if redir.Word != nil {
-		info.Target = wordToString(redir.Word, printer)
+		info.Target = word
 		info.TargetLiteral = isLiteralRedirectTarget(redir.Word)
 	}
 

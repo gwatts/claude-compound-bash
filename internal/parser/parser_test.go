@@ -279,6 +279,31 @@ func TestParseRedirectHereString(t *testing.T) {
 	assert.True(t, result.Redirects[0].IsHeredoc)
 }
 
+// TestParseRedirectRaw guards against a regression where the mvdan.cc/sh
+// printer could not serialize a bare *syntax.Redirect node, leaving Raw set
+// to "<unprintable>" for every redirect.
+func TestParseRedirectRaw(t *testing.T) {
+	tests := []struct {
+		cmd string
+		raw string
+	}{
+		{"echo hi > output.txt", ">output.txt"},
+		{"echo line >> log.txt", ">>log.txt"},
+		{"cmd 2>&1", "2>&1"},
+		{"cmd > $OUT", ">$OUT"},
+		{"cmd &> all.log", "&>all.log"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.cmd, func(t *testing.T) {
+			result, err := Parse(tt.cmd)
+			require.NoError(t, err)
+			require.Len(t, result.Redirects, 1)
+			assert.Equal(t, tt.raw, result.Redirects[0].Raw)
+			assert.NotContains(t, result.Redirects[0].Raw, "unprintable")
+		})
+	}
+}
+
 func TestParseRedirectMultiple(t *testing.T) {
 	result, err := Parse("cmd < in.txt > out.txt 2>&1")
 	require.NoError(t, err)
