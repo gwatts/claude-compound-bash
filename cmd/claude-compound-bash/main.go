@@ -12,6 +12,7 @@ import (
 	"github.com/gwatts/claude-compound-bash/internal/hook"
 	"github.com/gwatts/claude-compound-bash/internal/logfile"
 	"github.com/gwatts/claude-compound-bash/internal/matcher"
+	"github.com/gwatts/claude-compound-bash/internal/parser"
 	"github.com/gwatts/claude-compound-bash/internal/settings"
 )
 
@@ -84,6 +85,12 @@ func run() error {
 	if err != nil {
 		log.Log("failed to load settings: %v", err)
 		perms = &settings.ResolvedPermissions{}
+	}
+
+	// Always allow output redirects into Claude Code's own scratchpad tree,
+	// regardless of the user's configured additionalDirectories.
+	if tmp := parser.ClaudeTempDir(); tmp != "" {
+		perms.AdditionalDirectories = append(perms.AdditionalDirectories, tmp)
 	}
 
 	allowPatterns := matcher.ParsePatterns(perms.Allow)

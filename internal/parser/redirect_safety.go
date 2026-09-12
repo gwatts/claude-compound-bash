@@ -187,6 +187,19 @@ func NormalizeTmpPath(path string) string {
 	return path
 }
 
+// ClaudeTempDir returns the root of Claude Code's per-user temporary tree
+// (e.g. /tmp/claude-501, which normalizes to /private/tmp/claude-501 on macOS).
+// Claude Code places its per-session scratchpad directories beneath this root,
+// so output redirects that land inside it are always safe.
+//
+// It returns an empty string on platforms where the location is unknown.
+func ClaudeTempDir() string {
+	if runtime.GOOS == "windows" {
+		return ""
+	}
+	return fmt.Sprintf("/tmp/claude-%d", os.Getuid())
+}
+
 // ExpandAdditionalDirs expands a list of additional allowed directories,
 // handling special cases like /tmp on macOS.
 // Returns an error if any path is not absolute.

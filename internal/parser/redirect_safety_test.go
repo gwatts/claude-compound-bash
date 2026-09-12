@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -145,6 +146,26 @@ func TestExpandAdditionalDirs(t *testing.T) {
 			assert.Contains(t, result, filepath.Clean(tmpdir), "macOS $TMPDIR added")
 		}
 	}
+}
+
+func TestClaudeTempDir(t *testing.T) {
+	dir := ClaudeTempDir()
+	if runtime.GOOS == "windows" {
+		assert.Empty(t, dir, "unknown location on Windows")
+		return
+	}
+
+	want := fmt.Sprintf("/tmp/claude-%d", os.Getuid())
+	assert.Equal(t, want, dir, "rooted at /tmp/claude-<uid>")
+
+	// A redirect inside the scratchpad tree must be treated as allowed once
+	// the dir is expanded (which normalizes /tmp -> /private/tmp on macOS).
+	expanded, err := ExpandAdditionalDirs([]string{dir})
+	require.NoError(t, err)
+	target, err := ResolvePath(filepath.Join(dir, "session", "scratchpad", "out.log"), "/")
+	require.NoError(t, err)
+	assert.True(t, IsInsideAllowedDir(target, "/nonexistent-cwd", expanded),
+		"scratchpad redirect is inside the allowed tree")
 }
 
 func TestNormalizeTmpPath(t *testing.T) {

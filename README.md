@@ -54,6 +54,7 @@ Output redirects (`>`, `>>`, `&>`, etc.) are validated to prevent writes outside
 
 **Auto-allowed:**
 - Redirects to files inside the current working directory
+- Redirects into Claude Code's own scratchpad tree (`/tmp/claude-<uid>`, i.e. `/private/tmp/claude-<uid>` on macOS), where Claude Code places per-session temporary files
 - Safe devices: `/dev/null`, `/dev/stdout`, `/dev/stderr`, `/dev/stdin`, `/dev/zero`, `/dev/random`, `/dev/urandom`
 - FD-to-FD duplications: `2>&1`, `>&2`
 - Heredocs and here-strings: `<<EOF`, `<<<`
