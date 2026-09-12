@@ -536,6 +536,77 @@ func TestProcessRedirectAllowedCommandAsks(t *testing.T) {
 	}
 }
 
+// In-place editors (sed -i, perl -i, gawk -i inplace) rewrite a file passed as
+// a positional argument, which native's redirect check never sees. The hook
+// path-scopes those targets like redirect targets.
+func TestProcessInPlaceEditWithinCwd(t *testing.T) {
+	input := &HookInput{
+		ToolName:  "Bash",
+		ToolInput: ToolInput{Command: "sed -i '' 's/a/b/' src/main.go"},
+		Cwd:       "/tmp/project",
+	}
+	result := Process(input, patterns("Bash(sed:*)"), nil, nil, nil, nopLog())
+	assert.Equal(t, ResultAllowed, result.Kind, "in-place edit inside cwd should be allowed")
+}
+
+func TestProcessInPlaceEditInAdditionalDir(t *testing.T) {
+	input := &HookInput{
+		ToolName:  "Bash",
+		ToolInput: ToolInput{Command: "sed -i '' 's/a/b/' /work/notes.txt"},
+		Cwd:       "/tmp/project",
+	}
+	result := Process(input, patterns("Bash(sed:*)"), nil, nil, []string{"/work"}, nopLog())
+	assert.Equal(t, ResultAllowed, result.Kind, "in-place edit in an allowed dir should be allowed")
+}
+
+// Case B: an allow-matched in-place editor targeting outside the allowed dirs
+// must ask, since allowing would suppress native's own checks.
+func TestProcessInPlaceEditOutsideCwdAsks(t *testing.T) {
+	cases := map[string]string{
+		"absolute outside": "sed -i '' 's/a/b/' /etc/hosts",
+		"parent escape":    "sed -i '' 's/a/b/' ../other/file",
+		"dynamic target":   "sed -i '' 's/a/b/' $OUT",
+		"protected git":    "sed -i '' 's/a/b/' .git/config",
+		"perl outside":     "perl -i -pe 's/a/b/' /etc/hosts",
+		"awk outside":      "gawk -i inplace '{print}' /etc/hosts",
+	}
+	for name, cmd := range cases {
+		t.Run(name, func(t *testing.T) {
+			input := &HookInput{
+				ToolName:  "Bash",
+				ToolInput: ToolInput{Command: cmd},
+				Cwd:       "/tmp/project",
+			}
+			result := Process(input, patterns("Bash(sed:*)", "Bash(perl:*)", "Bash(gawk:*)"), nil, nil, nil, nopLog())
+			assert.Equal(t, ResultAsk, result.Kind, "in-place edit outside allowed dirs should ask")
+		})
+	}
+}
+
+// Case A: when the in-place editor isn't allow-matched, an outside target
+// defers to native rather than forcing a prompt.
+func TestProcessInPlaceEditOutsideNotAllowedDefers(t *testing.T) {
+	input := &HookInput{
+		ToolName:  "Bash",
+		ToolInput: ToolInput{Command: "perl -i -pe 's/a/b/' /etc/hosts"},
+		Cwd:       "/tmp/project",
+	}
+	result := Process(input, patterns(), nil, nil, nil, nopLog())
+	assert.Equal(t, ResultDefer, result.Kind, "unmatched in-place editor defers to native")
+}
+
+// Read-only sed (no -i) with an outside path argument is not a write and must
+// not be flagged.
+func TestProcessSedReadOnlyOutsidePathAllowed(t *testing.T) {
+	input := &HookInput{
+		ToolName:  "Bash",
+		ToolInput: ToolInput{Command: "sed -n '1,5p' /etc/hosts"},
+		Cwd:       "/tmp/project",
+	}
+	result := Process(input, patterns("Bash(sed:*)"), nil, nil, nil, nopLog())
+	assert.Equal(t, ResultAllowed, result.Kind, "read-only sed should not be path-checked")
+}
+
 func TestProcessRedirectDynamicTarget(t *testing.T) {
 	input := &HookInput{
 		ToolName:  "Bash",

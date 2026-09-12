@@ -34,6 +34,11 @@ type Command struct {
 	// than defer, because native may auto-approve the enclosing (often read-only)
 	// command without ever seeing this one.
 	Nested bool
+	// InPlaceTargets are the files this command rewrites in place (sed -i,
+	// perl -i, gawk -i inplace). It is nil for other commands. These targets are
+	// validated against the allowed directories like redirect targets, since the
+	// file is a positional argument that native's redirect check never sees.
+	InPlaceTargets []WriteTarget
 }
 
 // ParseResult contains all information extracted from parsing a command.
@@ -232,6 +237,7 @@ func extractCallExpr(call *syntax.CallExpr, printer *syntax.Printer) Command {
 		firstWord := call.Args[0]
 		if isLiteralWord(firstWord) {
 			cmd.Name = wordToString(firstWord, printer)
+			cmd.InPlaceTargets = inPlaceTargets(cmd.Name, call.Args)
 		} else {
 			cmd.Dynamic = true
 		}

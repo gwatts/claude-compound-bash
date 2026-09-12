@@ -69,6 +69,17 @@ The check therefore only forces a prompt when the command **would otherwise be a
 
 **Not checked:** Input redirects (`<`, `<<`) are not validated, matching the built-in Bash tool.
 
+#### In-place edits
+
+The same path-scoping applies to commands that rewrite a file passed as a positional **argument** rather than via a redirect: `sed -i` / `sed --in-place`, `perl -i`, and `gawk -i inplace`. Native's redirect check never sees these targets (they aren't redirects), so the hook parses the file operand(s) itself -- skipping the script, options, and option-arguments (including the BSD vs GNU `-i` suffix difference), and awk `var=val` assignment operands. Each resolved target is checked exactly like a redirect target:
+
+- `sed -i '' 's/a/b/' src/main.go` -> allowed (inside cwd)
+- `sed -i '' 's/a/b/' /etc/hosts` -> ask (outside allowed dirs)
+- `sed -i '' 's/a/b/' $OUT` -> ask (dynamic target)
+- `sed -n '1,5p' /etc/hosts` -> not a write; not path-checked
+
+This lets Claude freely edit source files inside the directories it's allowed to work in, while still prompting before an in-place edit escapes them. As with redirects, the prompt is only forced when the command would otherwise be allowed; an in-place editor that isn't allow-matched defers to Claude Code instead. It replaces a blunt `Bash(sed -i*)` ask rule, which prompts on *every* in-place edit regardless of where it writes.
+
 Symlinks are fully resolved before path checks to prevent escape attacks.
 
 #### Additional output directories

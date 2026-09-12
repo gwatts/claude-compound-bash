@@ -180,6 +180,18 @@ func Process(input *HookInput, allowPatterns []matcher.Pattern, askPatterns []ma
 		switch result {
 		case commandAllowed:
 			log.Log("  ok [%s]: %s", cmd.String(), reason)
+			// An allowed command that rewrites a file in place must not do so
+			// outside the allowed directories. Allowing suppresses native's flow
+			// (and native only path-checks redirect targets, never an in-place
+			// editor's file argument), so the hook stands in for it and asks. If
+			// the command weren't allowed it would defer below, and native's
+			// classifier would see it — so we only assert this on the allow path.
+			if u := checkInPlaceWrite(cmd, input.Cwd, expandedDirs, hasPathMutator, log); u != nil {
+				log.Log("ASK [%s]: %s", cmd.String(), u.Reason)
+				if worst != ResultAsk {
+					worst, worstReason, worstBlocked = ResultAsk, u.Reason, u.BlockedCommand
+				}
+			}
 		case commandDenied:
 			// Already checked in phase 1, but checkCommand may still return this
 			// for edge cases. Deny wins outright.
@@ -502,67 +514,89 @@ func checkRedirect(redir parser.RedirectInfo, cwd string, additionalDirs []strin
 		return Result{Kind: ResultAllowed}
 	}
 
-	// Dynamic targets (variables, globs, tilde) require ask
-	if !redir.TargetLiteral {
-		log.Log("unsafe redirect [%s]: dynamic target", redir.Raw)
-		return Result{
-			Kind:           ResultAsk,
-			Reason:         fmt.Sprintf("redirect target is dynamic: %q", redir.Raw),
-			BlockedCommand: redir.Raw,
-		}
-	}
-
-	// Check for safe device files
-	if parser.IsSafeDevice(redir.Target) {
+	// Safe device files (/dev/null etc.) are always allowed as redirect targets.
+	if redir.TargetLiteral && parser.IsSafeDevice(redir.Target) {
 		log.Log("  redirect ok [%s]: safe device", redir.Raw)
 		return Result{Kind: ResultAllowed}
 	}
 
-	// If command contains path-mutating commands (cd, pushd, popd, ln), relative paths
-	// cannot be validated reliably - we don't know the effective target at execution time.
-	if hasPathMutator && !filepath.IsAbs(redir.Target) {
-		log.Log("unsafe redirect [%s]: relative path with path-mutating command", redir.Raw)
+	return checkWritePath("redirect", redir.Raw, redir.Target, redir.TargetLiteral, cwd, additionalDirs, hasPathMutator, log)
+}
+
+// checkWritePath validates a single write target (a redirect target or an
+// in-place editor's file operand) against the allowed directories. label
+// describes the write for logs and reasons ("redirect", "in-place edit").
+// Returns ResultAllowed when the target is inside an allowed directory, or
+// ResultAsk with a reason otherwise (dynamic, unresolvable, protected, or
+// outside). The caller decides whether an ask actually forces a prompt or is
+// downgraded to a defer.
+func checkWritePath(label, raw, target string, literal bool, cwd string, additionalDirs []string, hasPathMutator bool, log *logfile.Logger) Result {
+	// Dynamic targets (variables, globs, tilde) can't be resolved at hook time.
+	if !literal {
+		log.Log("unsafe %s [%s]: dynamic target", label, raw)
 		return Result{
 			Kind:           ResultAsk,
-			Reason:         fmt.Sprintf("relative redirect with path-mutating command (cd/ln/etc): %q", redir.Raw),
-			BlockedCommand: redir.Raw,
+			Reason:         fmt.Sprintf("%s target is dynamic: %q", label, raw),
+			BlockedCommand: raw,
 		}
 	}
 
-	// Resolve the path (handling symlinks)
-	resolved, err := parser.ResolvePath(redir.Target, cwd)
+	// With path-mutating commands (cd, pushd, popd, ln) present, relative paths
+	// can't be validated reliably - the effective target isn't known at hook time.
+	if hasPathMutator && !filepath.IsAbs(target) {
+		log.Log("unsafe %s [%s]: relative path with path-mutating command", label, raw)
+		return Result{
+			Kind:           ResultAsk,
+			Reason:         fmt.Sprintf("relative %s with path-mutating command (cd/ln/etc): %q", label, raw),
+			BlockedCommand: raw,
+		}
+	}
+
+	resolved, err := parser.ResolvePath(target, cwd)
 	if err != nil {
-		log.Log("unsafe redirect [%s]: cannot resolve path: %v", redir.Raw, err)
+		log.Log("unsafe %s [%s]: cannot resolve path: %v", label, raw, err)
 		return Result{
 			Kind:           ResultAsk,
-			Reason:         fmt.Sprintf("cannot resolve redirect path: %q", redir.Target),
-			BlockedCommand: redir.Raw,
+			Reason:         fmt.Sprintf("cannot resolve %s path: %q", label, target),
+			BlockedCommand: raw,
 		}
 	}
 
-	// Check for protected paths inside cwd (.git, .claude)
+	// Protected paths inside cwd (.git, .claude).
 	if parser.IsProtectedPath(resolved, cwd) {
-		log.Log("unsafe redirect [%s]: protected directory (resolved to %s)", redir.Raw, resolved)
+		log.Log("unsafe %s [%s]: protected directory (resolved to %s)", label, raw, resolved)
 		return Result{
 			Kind:           ResultAsk,
-			Reason:         fmt.Sprintf("redirect to protected directory: %q (resolved to %s)", redir.Target, resolved),
-			BlockedCommand: redir.Raw,
+			Reason:         fmt.Sprintf("%s to protected directory: %q (resolved to %s)", label, target, resolved),
+			BlockedCommand: raw,
 		}
 	}
 
-	// Check if path is inside cwd or additional allowed directories
 	if parser.IsInsideAllowedDir(resolved, cwd, additionalDirs) {
-		log.Log("  redirect ok [%s]: within allowed directory", redir.Raw)
+		log.Log("  %s ok [%s]: within allowed directory", label, raw)
 		return Result{Kind: ResultAllowed}
 	}
 
-	// Path is outside allowed directories - ask
-	log.Log("unsafe redirect [%s]: output outside allowed directories (resolved to %s)", redir.Raw, resolved)
+	log.Log("unsafe %s [%s]: outside allowed directories (resolved to %s)", label, raw, resolved)
 	return Result{
 		Kind:           ResultAsk,
-		Reason:         fmt.Sprintf("redirect outside allowed directories: %q (resolved to %s)", redir.Target, resolved),
-		BlockedCommand: redir.Raw,
+		Reason:         fmt.Sprintf("%s outside allowed directories: %q (resolved to %s)", label, target, resolved),
+		BlockedCommand: raw,
 	}
+}
+
+// checkInPlaceWrite validates the file operands of an in-place editing command
+// (sed -i, perl -i, gawk -i inplace). It returns the first unsafe target, or nil
+// when the command edits nothing in place or every target is inside an allowed
+// directory.
+func checkInPlaceWrite(cmd parser.Command, cwd string, additionalDirs []string, hasPathMutator bool, log *logfile.Logger) *Result {
+	for _, t := range cmd.InPlaceTargets {
+		result := checkWritePath("in-place edit", t.Raw, t.Path, t.Literal, cwd, additionalDirs, hasPathMutator, log)
+		if result.Kind != ResultAllowed {
+			return &result
+		}
+	}
+	return nil
 }
 
 func truncate(s string, n int) string {

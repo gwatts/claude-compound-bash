@@ -279,6 +279,55 @@ func TestParseRedirectHereString(t *testing.T) {
 	assert.True(t, result.Redirects[0].IsHeredoc)
 }
 
+func TestInPlaceTargets(t *testing.T) {
+	// path() extracts just the Path field for terse comparison.
+	paths := func(ts []WriteTarget) []string {
+		if len(ts) == 0 {
+			return nil
+		}
+		out := make([]string, len(ts))
+		for i, t := range ts {
+			out[i] = t.Path
+		}
+		return out
+	}
+	tests := []struct {
+		cmd     string
+		want    []string
+		literal bool // expected Literal of the first target (when want non-empty)
+	}{
+		{cmd: "sed -i '' 's/a/b/' file.txt", want: []string{"file.txt"}, literal: true},
+		{cmd: "sed -i '' 's/a/b/' /etc/hosts", want: []string{"/etc/hosts"}, literal: true},
+		{cmd: "sed -i.bak -e 's/a/b/' a.txt b.txt", want: []string{"a.txt", "b.txt"}, literal: true},
+		{cmd: "sed --in-place 's/a/b/' file.txt", want: []string{"file.txt"}, literal: true},
+		// A /regex/ sed address is the script, not a file path.
+		{cmd: "sed -i '' '/foo/d' file.txt", want: []string{"file.txt"}, literal: true},
+		{cmd: "sed -n '1,5p' file.txt", want: nil},
+		{cmd: "sed 's/a/b/' file.txt", want: nil},
+		// Only a script, no file operand: sed edits stdin, nothing in place.
+		{cmd: "sed -i '' 's/a/b/'", want: nil},
+		{cmd: "sed -i '' 's/a/b/' $OUT", want: []string{""}, literal: false},
+		{cmd: "perl -i -pe 's/a/b/' x.go", want: []string{"x.go"}, literal: true},
+		{cmd: "perl -pi.bak -e 's/x/y/' /tmp/z", want: []string{"/tmp/z"}, literal: true},
+		{cmd: "gawk -i inplace '{print}' data.txt", want: []string{"data.txt"}, literal: true},
+		{cmd: "gawk '{print}' data.txt", want: nil},
+		// awk assignment operands (g=2) are not files; -v x=1 is an option arg.
+		{cmd: "awk -i inplace -v x=1 '{print}' f1 g=2 f2", want: []string{"f1", "f2"}, literal: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.cmd, func(t *testing.T) {
+			result, err := Parse(tt.cmd)
+			require.NoError(t, err)
+			require.Len(t, result.Commands, 1)
+			got := result.Commands[0].InPlaceTargets
+			assert.Equal(t, tt.want, paths(got))
+			if len(tt.want) > 0 {
+				assert.Equal(t, tt.literal, got[0].Literal)
+			}
+		})
+	}
+}
+
 // TestParseRedirectRaw guards against a regression where the mvdan.cc/sh
 // printer could not serialize a bare *syntax.Redirect node, leaving Raw set
 // to "<unprintable>" for every redirect.
