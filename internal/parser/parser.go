@@ -83,21 +83,11 @@ func Parse(command string) (*ParseResult, error) {
 	var hasLinkCreator bool
 	printer := syntax.NewPrinter()
 
-	// Top-level static assignments let a redirect target that references a
-	// variable (e.g. `SCRATCH=/path; foo > "$SCRATCH/out"`) be resolved to the
-	// concrete path bash would use, so it goes through normal path validation
-	// instead of an unconditional prompt. Intrinsic environment variables (e.g.
-	// TMPDIR) resolve the same way, but only for names the command never assigns
-	// or unsets — otherwise the inherited value may not be what bash uses.
-	assigns := collectLiteralAssigns(file)
-	intrinsics := intrinsicVars()
-	if len(intrinsics) > 0 {
-		// An intrinsic value from the environment is only trustworthy if the
-		// command never changes the variable itself.
-		for name := range collectAssignedNames(file) {
-			delete(intrinsics, name)
-		}
-	}
+	// Static assignments and intrinsic environment variables let a redirect
+	// target that references a variable (e.g. `SCRATCH=/path; foo >
+	// "$SCRATCH/out"`) be resolved to the concrete path bash would use, so it
+	// goes through normal path validation instead of an unconditional prompt.
+	assigns, intrinsics := resolvableVars(file)
 
 	syntax.Walk(file, func(node syntax.Node) bool {
 		switch x := node.(type) {

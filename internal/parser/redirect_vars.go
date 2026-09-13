@@ -49,69 +49,166 @@ type literalAssign struct {
 	value  string
 }
 
-// collectLiteralAssigns scans the top-level statement list for standalone,
-// unconditional `NAME=value` assignments whose value is fully static (no
-// expansions, no tilde).
+// collectLiteralAssigns finds the static `NAME=value` assignments a later
+// redirect can safely resolve against: those guaranteed to run, in the current
+// shell, before the redirect is reached.
 //
-// Only direct children of the file's statement list qualify. Assignments
-// inside a subshell, brace group, loop, if/case body, function body, or a
-// `&&`/`||` branch are ignored because they may not run — or their value may
-// not survive — at the point a later redirect is expanded. A command-prefix
-// assignment (`FOO=bar cmd`) is ignored too: bash expands a redirect target
-// before applying the prefix, so the prefix value isn't in effect for that
-// command's own redirects. Both cases are excluded by the same rule — the
-// statement's command must be a bare CallExpr with assignments and no args.
+// It scans the top-level statement list — each entry runs unconditionally in
+// sequence — and within each entry follows the left spine of `&&`/`||` chains,
+// whose left operand always executes first (so `SCRATCH=/dir && cmd > "$SCRATCH/f"`
+// resolves). Assignments that may not run, or whose value may not survive, are
+// ignored: a command-prefix assignment (`FOO=bar cmd` — bash expands the
+// redirect before applying it), and anything inside a subshell, brace group,
+// loop, if/case body, or function body.
 func collectLiteralAssigns(file *syntax.File) []literalAssign {
 	var out []literalAssign
 	for _, stmt := range file.Stmts {
-		call, ok := stmt.Cmd.(*syntax.CallExpr)
-		if !ok || len(call.Args) != 0 || len(call.Assigns) == 0 {
-			continue
-		}
-		// Negation (`! FOO=bar`) and backgrounding (`FOO=bar &`) don't change
-		// the assigned value, so they need no special handling here.
-		for _, a := range call.Assigns {
-			name, value, ok := staticAssign(a)
-			if !ok {
-				continue
-			}
-			out = append(out, literalAssign{offset: stmt.Pos().Offset(), name: name, value: value})
-		}
+		collectLeadingAssigns(stmt, &out)
 	}
 	return out
 }
 
-// collectAssignedNames returns the set of variable names the command assigns or
-// unsets anywhere — including command prefixes, exports/declares, and function
-// bodies (which run in the current shell). A name in this set can't be resolved
-// from the inherited environment, because the command may change its value
-// before the redirect is expanded, so intrinsic expansion skips it.
-func collectAssignedNames(file *syntax.File) map[string]bool {
-	names := make(map[string]bool)
+// collectLeadingAssigns appends the static assignments in stmt that are
+// guaranteed to run before control passes to whatever follows it. A bare
+// assignment statement qualifies directly; for an `&&`/`||` chain the left
+// operand always runs first, and — past a run of pure, always-succeeding
+// assignments joined by `&&` — so do the right operands.
+func collectLeadingAssigns(stmt *syntax.Stmt, out *[]literalAssign) {
+	// A backgrounded (`&`) or coprocess (`|&`) statement runs in a subshell,
+	// so its assignments never affect the current shell.
+	if stmt.Background || stmt.Coprocess {
+		return
+	}
+	switch cmd := stmt.Cmd.(type) {
+	case *syntax.CallExpr:
+		// A command prefix (args present) doesn't persist past the command,
+		// and its value isn't in effect for that command's own redirects.
+		if len(cmd.Args) != 0 {
+			return
+		}
+		for _, a := range cmd.Assigns {
+			if name, value, ok := staticAssign(a); ok {
+				*out = append(*out, literalAssign{offset: a.Pos().Offset(), name: name, value: value})
+			}
+		}
+	case *syntax.BinaryCmd:
+		if cmd.Op != syntax.AndStmt && cmd.Op != syntax.OrStmt {
+			return
+		}
+		// The left operand always executes first.
+		collectLeadingAssigns(cmd.X, out)
+		// The right operand runs only when the left doesn't short-circuit it.
+		// A run of pure assignments always exits 0, so the right side of such
+		// an `&&` is guaranteed (after `||` a succeeding left skips the right).
+		if cmd.Op == syntax.AndStmt && isPureAssignChain(cmd.X) {
+			collectLeadingAssigns(cmd.Y, out)
+		}
+	}
+}
+
+// isPureAssignChain reports whether stmt is a static assignment, or an
+// `&&`/`||` chain built only from such assignments. Such a statement always
+// exits 0 and runs no external command, so a following `&&` operand is
+// guaranteed to run. A dynamic value (e.g. `A=$(cmd)`) disqualifies it: it can
+// set a non-zero status and isn't a value we track anyway.
+func isPureAssignChain(stmt *syntax.Stmt) bool {
+	if stmt.Negated || stmt.Background || stmt.Coprocess {
+		return false
+	}
+	switch cmd := stmt.Cmd.(type) {
+	case *syntax.CallExpr:
+		if len(cmd.Args) != 0 || len(cmd.Assigns) == 0 {
+			return false
+		}
+		for _, a := range cmd.Assigns {
+			if _, _, ok := staticAssign(a); !ok {
+				return false
+			}
+		}
+		return true
+	case *syntax.BinaryCmd:
+		if cmd.Op != syntax.AndStmt && cmd.Op != syntax.OrStmt {
+			return false
+		}
+		return isPureAssignChain(cmd.X) && isPureAssignChain(cmd.Y)
+	}
+	return false
+}
+
+// resolvableVars determines which variables a redirect target may safely be
+// resolved against, given the whole command.
+//
+// It starts from the guaranteed-leading static assignments and the intrinsic
+// environment variables, then removes every variable whose value at the
+// redirect can't be trusted: one that is also assigned or unset somewhere we
+// don't account for — a conditional or nested reassignment, an export/declare,
+// a dynamic value, an unset, or a command prefix. Such a variable might hold a
+// different value at run time than any assignment we captured, so it must stay
+// dynamic rather than resolve to a stale value.
+func resolvableVars(file *syntax.File) (assigns []literalAssign, intrinsics map[string]string) {
+	assigns = collectLiteralAssigns(file)
+	intrinsics = intrinsicVars()
+	if len(assigns) == 0 && len(intrinsics) == 0 {
+		return nil, nil
+	}
+
+	// Offsets of the assignments we treat as guaranteed-leading and static.
+	safe := make(map[uint]bool, len(assigns))
+	for _, a := range assigns {
+		safe[a.offset] = true
+	}
+
+	// Names touched by any assignment or unset that isn't one of those.
+	uncertain := make(map[string]bool)
 	syntax.Walk(file, func(node syntax.Node) bool {
 		switch x := node.(type) {
 		case *syntax.Assign:
-			if x.Name != nil {
-				names[x.Name.Value] = true
+			if x.Name != nil && !safe[x.Pos().Offset()] {
+				uncertain[x.Name.Value] = true
 			}
 		case *syntax.CallExpr:
-			// `unset VAR ...` clears variables in the current shell.
-			if len(x.Args) == 0 {
-				return true
-			}
-			if name, ok := staticWordValue(x.Args[0]); !ok || name != "unset" {
-				return true
-			}
-			for _, arg := range x.Args[1:] {
-				name, ok := staticWordValue(arg)
-				if !ok || strings.HasPrefix(name, "-") {
-					continue // skip flags (-v, -f) and dynamic names
-				}
-				names[name] = true
+			for _, name := range unsetTargets(x) {
+				uncertain[name] = true
 			}
 		}
 		return true
 	})
+
+	if len(uncertain) == 0 {
+		return assigns, intrinsics
+	}
+	for name := range intrinsics {
+		if uncertain[name] {
+			delete(intrinsics, name)
+		}
+	}
+	kept := assigns[:0]
+	for _, a := range assigns {
+		if !uncertain[a.name] {
+			kept = append(kept, a)
+		}
+	}
+	return kept, intrinsics
+}
+
+// unsetTargets returns the variable names an `unset VAR ...` command clears in
+// the current shell. It returns nil for any other command. Flags (-v, -f) and
+// dynamic operands are skipped.
+func unsetTargets(call *syntax.CallExpr) []string {
+	if len(call.Args) == 0 {
+		return nil
+	}
+	if name, ok := staticWordValue(call.Args[0]); !ok || name != "unset" {
+		return nil
+	}
+	var names []string
+	for _, arg := range call.Args[1:] {
+		name, ok := staticWordValue(arg)
+		if !ok || strings.HasPrefix(name, "-") {
+			continue
+		}
+		names = append(names, name)
+	}
 	return names
 }
 
@@ -245,8 +342,8 @@ func simpleParamValue(pe *syntax.ParamExp, vars map[string]string) (string, bool
 // effectiveVars returns the variables in scope for a redirect at offset:
 // intrinsic environment variables as the base, overlaid with the command's own
 // static assignments that take effect before offset (an in-command assignment
-// always wins over the inherited value). assigns is in source order, so the
-// scan stops at the first assignment at or after offset.
+// always wins over the inherited value). assigns is in source order, so applying
+// those before offset in turn leaves the last such assignment to each name.
 func effectiveVars(assigns []literalAssign, intrinsics map[string]string, offset uint) map[string]string {
 	var vars map[string]string
 	if len(intrinsics) > 0 {
@@ -257,7 +354,7 @@ func effectiveVars(assigns []literalAssign, intrinsics map[string]string, offset
 	}
 	for _, a := range assigns {
 		if a.offset >= offset {
-			break
+			continue
 		}
 		if vars == nil {
 			vars = make(map[string]string)

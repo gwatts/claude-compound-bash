@@ -82,6 +82,30 @@ func TestExpandRedirectTargetVars(t *testing.T) {
 			literal: true,
 			target:  "/tmp/s",
 		},
+		{
+			name:    "assignment as && left operand runs first",
+			cmd:     `S=/tmp/s && echo hi > "$S/out"`,
+			literal: true,
+			target:  "/tmp/s/out",
+		},
+		{
+			name:    "chained && assignments before command",
+			cmd:     `A=/tmp && B=sub && echo hi > "$A/$B/out"`,
+			literal: true,
+			target:  "/tmp/sub/out",
+		},
+		{
+			name:    "assignment as || left operand still runs",
+			cmd:     `S=/tmp/s || true; echo hi > "$S/out"`,
+			literal: true,
+			target:  "/tmp/s/out",
+		},
+		{
+			name:    "&& assignment then redirect inside a pipeline",
+			cmd:     `S=/tmp/s && cat in.txt | grep foo > "$S/out"`,
+			literal: true,
+			target:  "/tmp/s/out",
+		},
 
 		// --- deliberately left dynamic (unsound or unresolvable) ---
 		{
@@ -105,8 +129,18 @@ func TestExpandRedirectTargetVars(t *testing.T) {
 			literal: false,
 		},
 		{
-			name:    "assignment in && branch is not top-level",
-			cmd:     `S=/tmp/s && echo hi > "$S/out"`,
+			name:    "conditional && right operand may not run",
+			cmd:     `grep -q foo bar && S=/tmp/s; echo hi > "$S/out"`,
+			literal: false,
+		},
+		{
+			name:    "conditional reassignment after safe assignment is not trusted",
+			cmd:     `S=/tmp/s; grep -q x y || S=/other; echo hi > "$S/out"`,
+			literal: false,
+		},
+		{
+			name:    "reassignment inside if body is not trusted",
+			cmd:     `S=/tmp/s; if foo; then S=/other; fi; echo hi > "$S/out"`,
 			literal: false,
 		},
 		{
@@ -306,6 +340,20 @@ func TestExpandRedirectIntrinsicHOME(t *testing.T) {
 	require.NoError(t, err)
 	r = outputPathRedirect(t, result.Redirects)
 	assert.False(t, r.TargetLiteral, "prefix reassignment of HOME suppresses intrinsic")
+}
+
+// TestExpandRedirectReportedCommand covers the real reported shape: a scratch
+// dir assigned with `&&`, a build redirected into it with `2>&1`, then follow-up
+// statements that read the same file back.
+func TestExpandRedirectReportedCommand(t *testing.T) {
+	cmd := `SCRATCH=/private/tmp/claude-501/proj/sess/scratchpad && ` +
+		`swift build --disable-automatic-resolution > "$SCRATCH/build2.log" 2>&1; ` +
+		`echo "EXIT:$?"; grep -c "error:" "$SCRATCH/build2.log"`
+	result, err := Parse(cmd)
+	require.NoError(t, err)
+	r := outputPathRedirect(t, result.Redirects)
+	assert.True(t, r.TargetLiteral, "the && scratch assignment should resolve the redirect")
+	assert.Equal(t, "/private/tmp/claude-501/proj/sess/scratchpad/build2.log", r.Target)
 }
 
 // TestExpandRedirectMultiAssignStatement verifies that several standalone
