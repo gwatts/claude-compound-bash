@@ -83,6 +83,22 @@ func Parse(command string) (*ParseResult, error) {
 	var hasLinkCreator bool
 	printer := syntax.NewPrinter()
 
+	// Top-level static assignments let a redirect target that references a
+	// variable (e.g. `SCRATCH=/path; foo > "$SCRATCH/out"`) be resolved to the
+	// concrete path bash would use, so it goes through normal path validation
+	// instead of an unconditional prompt. Intrinsic environment variables (e.g.
+	// TMPDIR) resolve the same way, but only for names the command never assigns
+	// or unsets — otherwise the inherited value may not be what bash uses.
+	assigns := collectLiteralAssigns(file)
+	intrinsics := intrinsicVars()
+	if len(intrinsics) > 0 {
+		// An intrinsic value from the environment is only trustworthy if the
+		// command never changes the variable itself.
+		for name := range collectAssignedNames(file) {
+			delete(intrinsics, name)
+		}
+	}
+
 	syntax.Walk(file, func(node syntax.Node) bool {
 		switch x := node.(type) {
 		case *syntax.Stmt:
@@ -92,7 +108,7 @@ func Parse(command string) (*ParseResult, error) {
 			// - "> file" (Stmt.Cmd = nil, redirect-only)
 			// - "(subcmd) > file" (Stmt.Cmd = Subshell)
 			for _, redir := range x.Redirs {
-				redirects = append(redirects, extractRedirect(redir, printer))
+				redirects = append(redirects, extractRedirect(redir, printer, assigns, intrinsics))
 			}
 
 		case *syntax.CallExpr:
@@ -187,7 +203,10 @@ func isLinkCreator(name string) bool {
 }
 
 // extractRedirect extracts redirect information from an AST Redirect node.
-func extractRedirect(redir *syntax.Redirect, printer *syntax.Printer) RedirectInfo {
+// assigns carries the command's top-level static assignments and intrinsics the
+// safe environment variables, both used to resolve a variable in the target to
+// a concrete path.
+func extractRedirect(redir *syntax.Redirect, printer *syntax.Printer, assigns []literalAssign, intrinsics map[string]string) RedirectInfo {
 	info := RedirectInfo{
 		Op: redir.Op,
 	}
@@ -217,6 +236,19 @@ func extractRedirect(redir *syntax.Redirect, printer *syntax.Printer) RedirectIn
 	if redir.Word != nil {
 		info.Target = word
 		info.TargetLiteral = isLiteralRedirectTarget(redir.Word)
+
+		// A target that isn't literal on its face may still resolve to a fixed
+		// path when it references only variables assigned a static value
+		// earlier in the same command. fd-to-fd duplications (>&N) are left
+		// alone: their target is a descriptor, classified by IsFDDup, not a
+		// path to expand.
+		if !info.TargetLiteral && redir.Op != syntax.DplIn && redir.Op != syntax.DplOut {
+			vars := effectiveVars(assigns, intrinsics, redir.Word.Pos().Offset())
+			if expanded, ok := expandRedirectTarget(redir.Word, vars); ok {
+				info.Target = expanded
+				info.TargetLiteral = true
+			}
+		}
 	}
 
 	return info

@@ -64,10 +64,26 @@ The check therefore only forces a prompt when the command **would otherwise be a
 **Requires confirmation** (when the command would otherwise be allowed; deferred to Claude Code otherwise)**:**
 - Redirects outside the working directory (unless in `additionalDirectories`)
 - Protected paths: `.git/` and `.claude/` directories at any nesting level
-- Dynamic targets: `> $FILE`, `> ~/file`, `> *.log`, extglob patterns
+- Dynamic targets that can't be resolved to a fixed path: `> $FILE`, `> ~/file`, `> *.log`, extglob patterns (but see [Resolved variables](#resolved-variables))
 - Relative redirects when `cd`, `pushd`, `popd`, or `ln` appear in the command (TOCTOU protection)
 
 **Not checked:** Input redirects (`<`, `<<`) are not validated, matching the built-in Bash tool.
+
+#### Resolved variables
+
+A redirect target that references a variable isn't automatically treated as dynamic: when the variable's value is statically known, it's substituted and the resulting path is validated like any literal. This lets the common "assign a scratch dir, then write into it" pattern be auto-allowed instead of prompting on every write:
+
+```bash
+SCRATCH=/tmp/claude-501/session/scratchpad
+echo results > "$SCRATCH/out.txt"   # resolves to the scratchpad tree -> allowed
+```
+
+A variable resolves when it is:
+
+- **Assigned a literal value earlier in the same command** -- a top-level, unconditional `NAME=value` statement (`SCRATCH=/path/to/dir; ... > "$SCRATCH/out"`). Assignments that may not hold where the redirect runs are deliberately *not* used: a command prefix (`NAME=v cmd`), or an assignment inside a subshell, `&&`/`||` branch, loop, conditional, or function body. A value that is itself dynamic (`S=$(...)`, `S=$OTHER/x`) doesn't resolve either.
+- **An intrinsic environment variable the command never touches** -- currently `HOME` and `TMPDIR`. These are read from the environment the Bash tool inherits, so `> "$HOME/logs/app.log"` matches an `additionalDirectories` entry written as the literal `/Users/you/logs`, and `> "$TMPDIR/x"` matches the `$TMPDIR` that permitting `/tmp` already allows. If the command assigns or unsets the variable anywhere (including via `export` or in a function body), the inherited value is not used and the target stays dynamic.
+
+Resolution only ever turns an *unknown* target into a *known* one -- the resolved path still goes through the same working-directory, protected-path, and `additionalDirectories` checks, so it can never widen what's allowed. Only plain `$VAR` / `${VAR}` references resolve; any modifier (`${VAR:-default}`, `${VAR#prefix}`, array indices, etc.) keeps the target dynamic.
 
 #### In-place edits
 

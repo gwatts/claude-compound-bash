@@ -486,6 +486,59 @@ func TestProcessRedirectOutsideCwd(t *testing.T) {
 	assert.Contains(t, result.Reason, "outside allowed directories")
 }
 
+// A redirect target built from a variable assigned a literal path earlier in
+// the same command resolves to that path and is validated like any literal —
+// here it lands inside cwd, so it is allowed rather than prompted.
+func TestProcessRedirectVarWithinCwd(t *testing.T) {
+	input := &HookInput{
+		ToolName:  "Bash",
+		ToolInput: ToolInput{Command: `S=/tmp/project/sub; echo hi > "$S/out.log"`},
+		Cwd:       "/tmp/project",
+	}
+	result := Process(input, patterns(), nil, nil, nil, nopLog())
+	assert.Equal(t, ResultAllowed, result.Kind, "resolved redirect within cwd should be allowed")
+}
+
+// The resolved path is still validated: a variable pointing outside the allowed
+// directories asks exactly as the literal form would.
+func TestProcessRedirectVarOutsideCwd(t *testing.T) {
+	input := &HookInput{
+		ToolName:  "Bash",
+		ToolInput: ToolInput{Command: `S=/etc; echo hi > "$S/passwd"`},
+		Cwd:       "/tmp/project",
+	}
+	result := Process(input, patterns(), nil, nil, nil, nopLog())
+	assert.Equal(t, ResultAsk, result.Kind, "resolved redirect outside cwd should ask")
+	assert.Contains(t, result.Reason, "outside allowed directories")
+}
+
+// A model instructed to write under $HOME/logs resolves to the literal path a
+// user's trusted-directory list holds (/Users/joe/logs), so the write is
+// allowed instead of prompted.
+func TestProcessRedirectHomeVarInAllowedDir(t *testing.T) {
+	t.Setenv("HOME", "/Users/joe")
+	input := &HookInput{
+		ToolName:  "Bash",
+		ToolInput: ToolInput{Command: `echo hi > "$HOME/logs/app.log"`},
+		Cwd:       "/tmp/project",
+	}
+	result := Process(input, patterns(), nil, nil, []string{"/Users/joe/logs"}, nopLog())
+	assert.Equal(t, ResultAllowed, result.Kind, "$HOME/logs resolves into the allowed dir")
+}
+
+// $TMPDIR resolves into the allow-set that permitting /tmp already produces
+// (ExpandAdditionalDirs adds $TMPDIR when /tmp is allowed).
+func TestProcessRedirectTmpdirVarAllowed(t *testing.T) {
+	t.Setenv("TMPDIR", "/var/tmpdir")
+	input := &HookInput{
+		ToolName:  "Bash",
+		ToolInput: ToolInput{Command: `echo hi > "$TMPDIR/out.log"`},
+		Cwd:       "/tmp/project",
+	}
+	result := Process(input, patterns(), nil, nil, []string{"/tmp"}, nopLog())
+	assert.Equal(t, ResultAllowed, result.Kind, "$TMPDIR resolves into the /tmp-derived allow-set")
+}
+
 // Case A: a non-inert, non-allow-matched command with an unsafe redirect must
 // DEFER, not force a prompt. Native sees the unmatched command and validates the
 // redirect target (and runs its classifier) itself.
