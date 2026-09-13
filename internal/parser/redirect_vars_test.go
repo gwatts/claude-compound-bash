@@ -106,6 +106,24 @@ func TestExpandRedirectTargetVars(t *testing.T) {
 			literal: true,
 			target:  "/tmp/s/out",
 		},
+		{
+			name:    "backgrounded && chain resolves within the same unit",
+			cmd:     `S=/tmp/s && swift test > "$S/out.log" 2>&1 & echo started`,
+			literal: true,
+			target:  "/tmp/s/out.log",
+		},
+		{
+			name:    "redirect inside a subshell sees the subshell assignment",
+			cmd:     `(S=/tmp/s; echo hi > "$S/out")`,
+			literal: true,
+			target:  "/tmp/s/out",
+		},
+		{
+			name:    "backgrounded subshell redirect resolves",
+			cmd:     `(S=/tmp/s && echo hi > "$S/out") &`,
+			literal: true,
+			target:  "/tmp/s/out",
+		},
 
 		// --- deliberately left dynamic (unsound or unresolvable) ---
 		{
@@ -121,6 +139,11 @@ func TestExpandRedirectTargetVars(t *testing.T) {
 		{
 			name:    "assignment inside subshell does not escape",
 			cmd:     `(S=/tmp/s); echo hi > "$S/out"`,
+			literal: false,
+		},
+		{
+			name:    "backgrounded assignment does not leak to a later statement",
+			cmd:     `S=/tmp/s & echo hi > "$S/out"`,
 			literal: false,
 		},
 		{
@@ -303,10 +326,11 @@ func TestExpandRedirectIntrinsicTMPDIR(t *testing.T) {
 			literal: false,
 		},
 		{
-			name:    "subshell assignment conservatively suppresses intrinsic",
+			name:    "subshell reassignment does not escape, intrinsic still applies",
 			tmpdir:  "/var/tmpdir",
 			cmd:     `(TMPDIR=/etc); echo hi > "$TMPDIR/out"`,
-			literal: false,
+			literal: true,
+			target:  "/var/tmpdir/out", // subshell TMPDIR=/etc doesn't leak; env value used
 		},
 	}
 

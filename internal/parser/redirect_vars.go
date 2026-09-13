@@ -40,44 +40,63 @@ func intrinsicVars() map[string]string {
 	return m
 }
 
-// literalAssign is a top-level `NAME=value` assignment whose value is fully
-// static, recorded in source order so a later redirect can resolve a variable
-// reference to the exact path bash would use at that point in the command.
+// unboundedScope marks an assignment that persists in the current shell for the
+// rest of the command (i.e. every later offset is within its scope).
+const unboundedScope = ^uint(0)
+
+// literalAssign is a `NAME=value` assignment whose value is fully static,
+// recorded in source order so a later redirect can resolve a variable reference
+// to the exact path bash would use at that point in the command. scopeEnd bounds
+// where the value applies: a top-level assignment persists to the end of the
+// command (unboundedScope), while one inside a backgrounded unit or a subshell
+// applies only to redirects within that same unit (its value never reaches the
+// current shell afterward).
 type literalAssign struct {
-	offset uint // byte offset of the assignment statement in the source
-	name   string
-	value  string
+	offset   uint // byte offset of the assignment in the source
+	scopeEnd uint // exclusive upper bound of offsets this value applies to
+	name     string
+	value    string
 }
 
 // collectLiteralAssigns finds the static `NAME=value` assignments a later
-// redirect can safely resolve against: those guaranteed to run, in the current
-// shell, before the redirect is reached.
+// redirect can safely resolve against: those guaranteed to run before the
+// redirect is reached, each tagged with the scope its value survives in.
 //
 // It scans the top-level statement list — each entry runs unconditionally in
 // sequence — and within each entry follows the left spine of `&&`/`||` chains,
 // whose left operand always executes first (so `SCRATCH=/dir && cmd > "$SCRATCH/f"`
-// resolves). Assignments that may not run, or whose value may not survive, are
-// ignored: a command-prefix assignment (`FOO=bar cmd` — bash expands the
-// redirect before applying it), and anything inside a subshell, brace group,
-// loop, if/case body, or function body.
+// resolves). It also descends into subshells and backgrounded units, but tags
+// those assignments with the unit's extent so they resolve only redirects inside
+// the same unit (matching bash: the value never escapes to the current shell).
+// Assignments that may not run are ignored: a command-prefix assignment
+// (`FOO=bar cmd` — bash expands the redirect before applying it), and anything
+// inside a loop, if/case body, or function body.
 func collectLiteralAssigns(file *syntax.File) []literalAssign {
 	var out []literalAssign
 	for _, stmt := range file.Stmts {
-		collectLeadingAssigns(stmt, &out)
+		collectLeadingAssigns(stmt, unboundedScope, &out)
 	}
 	return out
 }
 
 // collectLeadingAssigns appends the static assignments in stmt that are
-// guaranteed to run before control passes to whatever follows it. A bare
-// assignment statement qualifies directly; for an `&&`/`||` chain the left
-// operand always runs first, and — past a run of pure, always-succeeding
-// assignments joined by `&&` — so do the right operands.
-func collectLeadingAssigns(stmt *syntax.Stmt, out *[]literalAssign) {
-	// A backgrounded (`&`) or coprocess (`|&`) statement runs in a subshell,
-	// so its assignments never affect the current shell.
-	if stmt.Background || stmt.Coprocess {
+// guaranteed to run before control passes to whatever follows it, each recorded
+// with scopeEnd — the exclusive offset past which its value no longer applies.
+// A bare assignment statement qualifies directly; for an `&&`/`||` chain the
+// left operand always runs first, and — past a run of pure, always-succeeding
+// assignments joined by `&&` — so do the right operands. A backgrounded unit or
+// subshell narrows scopeEnd to that unit's extent, since its assignments don't
+// reach the current shell.
+func collectLeadingAssigns(stmt *syntax.Stmt, scopeEnd uint, out *[]literalAssign) {
+	if stmt.Coprocess {
 		return
+	}
+	// A backgrounded statement runs in a subshell: its assignments apply only
+	// within this statement, never to the current shell afterward.
+	if stmt.Background {
+		if e := stmt.End().Offset(); e < scopeEnd {
+			scopeEnd = e
+		}
 	}
 	switch cmd := stmt.Cmd.(type) {
 	case *syntax.CallExpr:
@@ -88,7 +107,7 @@ func collectLeadingAssigns(stmt *syntax.Stmt, out *[]literalAssign) {
 		}
 		for _, a := range cmd.Assigns {
 			if name, value, ok := staticAssign(a); ok {
-				*out = append(*out, literalAssign{offset: a.Pos().Offset(), name: name, value: value})
+				*out = append(*out, literalAssign{offset: a.Pos().Offset(), scopeEnd: scopeEnd, name: name, value: value})
 			}
 		}
 	case *syntax.BinaryCmd:
@@ -96,12 +115,21 @@ func collectLeadingAssigns(stmt *syntax.Stmt, out *[]literalAssign) {
 			return
 		}
 		// The left operand always executes first.
-		collectLeadingAssigns(cmd.X, out)
+		collectLeadingAssigns(cmd.X, scopeEnd, out)
 		// The right operand runs only when the left doesn't short-circuit it.
 		// A run of pure assignments always exits 0, so the right side of such
 		// an `&&` is guaranteed (after `||` a succeeding left skips the right).
 		if cmd.Op == syntax.AndStmt && isPureAssignChain(cmd.X) {
-			collectLeadingAssigns(cmd.Y, out)
+			collectLeadingAssigns(cmd.Y, scopeEnd, out)
+		}
+	case *syntax.Subshell:
+		// A subshell's assignments apply only within it. Its statements run in
+		// sequence, so each is a leading assignment within the narrowed scope.
+		if e := stmt.End().Offset(); e < scopeEnd {
+			scopeEnd = e
+		}
+		for _, s := range cmd.Stmts {
+			collectLeadingAssigns(s, scopeEnd, out)
 		}
 	}
 }
@@ -341,9 +369,12 @@ func simpleParamValue(pe *syntax.ParamExp, vars map[string]string) (string, bool
 
 // effectiveVars returns the variables in scope for a redirect at offset:
 // intrinsic environment variables as the base, overlaid with the command's own
-// static assignments that take effect before offset (an in-command assignment
-// always wins over the inherited value). assigns is in source order, so applying
-// those before offset in turn leaves the last such assignment to each name.
+// static assignments that apply at that offset — those that run before it
+// (a.offset < offset) and whose scope still covers it (offset < a.scopeEnd), so
+// a subshell/background assignment resolves a redirect inside the same unit but
+// not one after it. An in-command assignment always wins over the inherited
+// value. assigns is in source order, so the last applicable one to each name
+// wins.
 func effectiveVars(assigns []literalAssign, intrinsics map[string]string, offset uint) map[string]string {
 	var vars map[string]string
 	if len(intrinsics) > 0 {
@@ -353,7 +384,7 @@ func effectiveVars(assigns []literalAssign, intrinsics map[string]string, offset
 		}
 	}
 	for _, a := range assigns {
-		if a.offset >= offset {
+		if a.offset >= offset || offset >= a.scopeEnd {
 			continue
 		}
 		if vars == nil {
