@@ -124,8 +124,47 @@ func TestExpandRedirectTargetVars(t *testing.T) {
 			literal: true,
 			target:  "/tmp/s/out",
 		},
+		{
+			// The assignment is gated behind `cd` by `&&`, but the redirect is
+			// on the same `&&` spine — reaching it implies the assignment ran.
+			name:    "&& chain: assignment gated behind a command, redirect on the same spine",
+			cmd:     `cd /valid && S=/tmp/s && go test ./... > "$S/out.log" 2>&1`,
+			literal: true,
+			target:  "/tmp/s/out.log",
+		},
+		{
+			name:    "&& chain: multiple fallible commands before the gated assignment",
+			cmd:     `cd /valid && make && S=/tmp/s && cmd > "$S/out"`,
+			literal: true,
+			target:  "/tmp/s/out",
+		},
+		{
+			name:    "&& chain: gated assignment resolves a redirect inside a later subshell operand",
+			cmd:     `cd /valid && (S=/tmp/s && echo hi > "$S/out")`,
+			literal: true,
+			target:  "/tmp/s/out",
+		},
 
 		// --- deliberately left dynamic (unsound or unresolvable) ---
+		{
+			// A gated assignment holds only within its `&&` chain; the redirect
+			// after `;` runs even when `cd` fails and $S is never set (bash would
+			// expand it to "/leak"). This is the case0 shape from the worktree
+			// test command; it must stay dynamic.
+			name:    "gated && assignment does not leak past its chain to a later statement",
+			cmd:     `cd /valid && S=/tmp/s && cmd; echo hi > "$S/leak"`,
+			literal: false,
+		},
+		{
+			name:    "|| earlier in the spine breaks the gated-chain guarantee",
+			cmd:     `a || S=/tmp/s && cmd > "$S/out"`,
+			literal: false,
+		},
+		{
+			name:    "|| after the assignment breaks the gated-chain guarantee",
+			cmd:     `cmd1 && S=/tmp/s || cmd2 > "$S/out"`,
+			literal: false,
+		},
 		{
 			name:    "use before assignment",
 			cmd:     `echo hi > "$S/out"; S=/tmp/s`,
