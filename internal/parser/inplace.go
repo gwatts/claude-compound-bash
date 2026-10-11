@@ -50,10 +50,14 @@ type toolSpec struct {
 	skipAssignOperands bool
 }
 
-// sedArgShort differs by platform: BSD sed (-i takes a mandatory suffix
+// bsdSed selects BSD sed option parsing over GNU. It follows the platform's
+// default sed and is a variable so tests can exercise both dialects.
+var bsdSed = runtime.GOOS == "darwin"
+
+// sedArgShort differs by dialect: BSD sed (-i takes a mandatory suffix
 // argument) vs GNU sed (-i's suffix is attached only, never a separate token).
 func sedArgShort() string {
-	if runtime.GOOS == "darwin" {
+	if bsdSed {
 		return "efi"
 	}
 	return "ef"

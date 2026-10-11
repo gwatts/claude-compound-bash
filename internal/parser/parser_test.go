@@ -295,8 +295,13 @@ func TestInPlaceTargets(t *testing.T) {
 		cmd     string
 		want    []string
 		literal bool // expected Literal of the first target (when want non-empty)
+		gnuSed  bool // parse sed options as GNU rather than BSD
 	}{
 		{cmd: "sed -i '' 's/a/b/' file.txt", want: []string{"file.txt"}, literal: true},
+		// GNU -i never takes a separate suffix, so '' is the script and the
+		// expression is a file operand.
+		{cmd: "sed -i '' 's/a/b/' file.txt", want: []string{"s/a/b/", "file.txt"}, literal: true, gnuSed: true},
+		{cmd: "sed -i 's/a/b/' file.txt", want: []string{"file.txt"}, literal: true, gnuSed: true},
 		{cmd: "sed -i '' 's/a/b/' /etc/hosts", want: []string{"/etc/hosts"}, literal: true},
 		{cmd: "sed -i.bak -e 's/a/b/' a.txt b.txt", want: []string{"a.txt", "b.txt"}, literal: true},
 		{cmd: "sed --in-place 's/a/b/' file.txt", want: []string{"file.txt"}, literal: true},
@@ -315,7 +320,15 @@ func TestInPlaceTargets(t *testing.T) {
 		{cmd: "awk -i inplace -v x=1 '{print}' f1 g=2 f2", want: []string{"f1", "f2"}, literal: true},
 	}
 	for _, tt := range tests {
-		t.Run(tt.cmd, func(t *testing.T) {
+		name := tt.cmd
+		if tt.gnuSed {
+			name += " (gnu)"
+		}
+		t.Run(name, func(t *testing.T) {
+			orig := bsdSed
+			bsdSed = !tt.gnuSed
+			t.Cleanup(func() { bsdSed = orig })
+
 			result, err := Parse(tt.cmd)
 			require.NoError(t, err)
 			require.Len(t, result.Commands, 1)
