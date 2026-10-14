@@ -31,21 +31,29 @@ type ResolvedPermissions struct {
 
 // LoadPermissions reads allow and deny patterns from the user's global Claude
 // Code settings and (optionally) from project-level settings. It reads from:
-//   - ~/.claude/settings.json
-//   - ~/.claude/settings.local.json
-//   - <projectDir>/.claude/settings.json      (if set)
-//   - <projectDir>/.claude/settings.local.json (if set)
+//   - $CLAUDE_CONFIG_DIR/settings.json         (falls back to ~/.claude/settings.json if unset)
+//   - $CLAUDE_CONFIG_DIR/settings.local.json   (falls back to ~/.claude/settings.local.json)
+//   - <projectDir>/.claude/settings.json       (if CLAUDE_PROJECT_DIR is set)
+//   - <projectDir>/.claude/settings.local.json (if CLAUDE_PROJECT_DIR is set)
+//
+// The user-scope directory is CLAUDE_CONFIG_DIR when set, otherwise ~/.claude.
+// This matches how Claude Code itself resolves the config directory, so alternate
+// profiles (e.g. CLAUDE_CONFIG_DIR=~/.claude-work) resolve to the same settings
+// files the user's Claude session is reading.
 //
 // projectDir is read from the CLAUDE_PROJECT_DIR environment variable.
 // Project-level settings override user-level settings.
 // Deny rules from any scope block approval.
 func LoadPermissions() (*ResolvedPermissions, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return nil, err
+	claudeDir := os.Getenv("CLAUDE_CONFIG_DIR")
+	if claudeDir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return nil, err
+		}
+		claudeDir = filepath.Join(home, ".claude")
 	}
 
-	claudeDir := filepath.Join(home, ".claude")
 	files := []string{
 		filepath.Join(claudeDir, "settings.json"),
 		filepath.Join(claudeDir, "settings.local.json"),
