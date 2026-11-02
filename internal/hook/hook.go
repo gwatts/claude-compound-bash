@@ -16,10 +16,15 @@ import (
 
 // HookInput is the JSON structure received on stdin from Claude Code.
 type HookInput struct {
-	ToolName  string    `json:"tool_name"`
-	ToolInput ToolInput `json:"tool_input"`
-	Cwd       string    `json:"cwd"`
+	ToolName       string    `json:"tool_name"`
+	ToolInput      ToolInput `json:"tool_input"`
+	Cwd            string    `json:"cwd"`
+	PermissionMode string    `json:"permission_mode"`
 }
+
+// permissionModeAuto is the mode where Claude Code's classifier reviews the full
+// text of any Bash command the hook gives no decision on.
+const permissionModeAuto = "auto"
 
 // ToolInput holds the tool-specific parameters.
 type ToolInput struct {
@@ -76,6 +81,9 @@ type Result struct {
 	Reason string
 	// BlockedCommand is the first command that didn't match, if any.
 	BlockedCommand string
+	// Protected marks an unsafe write aimed at a protected directory (.git,
+	// .claude), which still prompts in auto mode.
+	Protected bool
 }
 
 // Process evaluates a hook input against the given allow, ask, and deny patterns.
@@ -154,13 +162,12 @@ func Process(input *HookInput, allowPatterns []matcher.Pattern, askPatterns []ma
 	// we don't force a prompt on that basis alone. If the command isn't
 	// allow-matched we defer, letting native's redirect validation and classifier
 	// see it. Only when the command would otherwise be allowed do we downgrade to
-	// ask — see the aggregation below. Capture the first unsafe redirect here.
+	// ask — see the aggregation below. Capture the first unsafe redirect here, preferring a protected one.
 	var unsafeRedirect *Result
 	for _, redir := range parseResult.Redirects {
 		result := checkRedirect(redir, input.Cwd, expandedDirs, hasPathMutator, log)
-		if result.Kind != ResultAllowed && unsafeRedirect == nil {
-			r := result
-			unsafeRedirect = &r
+		if result.Kind != ResultAllowed {
+			unsafeRedirect = strongerWrite(unsafeRedirect, result)
 		}
 	}
 
@@ -173,6 +180,12 @@ func Process(input *HookInput, allowPatterns []matcher.Pattern, askPatterns []ma
 	// nested command needs a forced ask, since native — which splits only on
 	// shell operators — may approve the enclosing read-only command without ever
 	// seeing it.
+	//
+	// In auto mode the classifier reads the whole command, so the asks the hook
+	// infers (nested commands, unsafe write targets) defer to it instead. Explicit
+	// ask rules, protected directories and find hazards still prompt.
+	autoMode := input.PermissionMode == permissionModeAuto
+	allMatched := true
 	worst := ResultAllowed
 	var worstReason, worstBlocked string
 	for _, cmd := range commands {
@@ -187,9 +200,16 @@ func Process(input *HookInput, allowPatterns []matcher.Pattern, askPatterns []ma
 			// the command weren't allowed it would defer below, and native's
 			// classifier would see it — so we only assert this on the allow path.
 			if u := checkInPlaceWrite(cmd, input.Cwd, expandedDirs, hasPathMutator, log); u != nil {
-				log.Log("ASK [%s]: %s", cmd.String(), u.Reason)
-				if worst != ResultAsk {
-					worst, worstReason, worstBlocked = ResultAsk, u.Reason, u.BlockedCommand
+				if autoMode && !u.Protected {
+					log.Log("DEFER [%s]: %s (auto mode; classifier reviews it)", cmd.String(), u.Reason)
+					if worst == ResultAllowed {
+						worst, worstReason, worstBlocked = ResultDefer, u.Reason, u.BlockedCommand
+					}
+				} else {
+					log.Log("ASK [%s]: %s", cmd.String(), u.Reason)
+					if worst != ResultAsk {
+						worst, worstReason, worstBlocked = ResultAsk, u.Reason, u.BlockedCommand
+					}
 				}
 			}
 		case commandDenied:
@@ -205,7 +225,8 @@ func Process(input *HookInput, allowPatterns []matcher.Pattern, askPatterns []ma
 				worst, worstReason, worstBlocked = ResultAsk, reason, cmd.String()
 			}
 		default: // commandDefer
-			if cmd.Nested {
+			allMatched = false
+			if cmd.Nested && !autoMode {
 				// Native's operator splitting can't see this command; force a
 				// prompt rather than defer to it.
 				log.Log("ASK [%s]: %s (nested; native would not see it)", cmd.String(), reason)
@@ -230,18 +251,30 @@ func Process(input *HookInput, allowPatterns []matcher.Pattern, askPatterns []ma
 	// command and its redirect to native (which does check redirect targets) plus
 	// the classifier. This keeps the hook additive: it only forces a redirect
 	// prompt native wouldn't have shown when it's about to suppress native's flow.
-	if unsafeRedirect != nil && worst == ResultAllowed {
-		log.Log("ASK: unsafe redirect on otherwise-allowed command: %s", unsafeRedirect.Reason)
-		worst, worstReason, worstBlocked = ResultAsk, unsafeRedirect.Reason, unsafeRedirect.BlockedCommand
+	if unsafeRedirect != nil && worst != ResultAsk {
+		switch {
+		case autoMode && unsafeRedirect.Protected:
+			// Checked first: with nested asks deferring in auto mode, nothing else
+			// would stop a sibling unmatched command downgrading this write.
+			log.Log("ASK: redirect into protected directory (auto mode): %s", unsafeRedirect.Reason)
+			worst, worstReason, worstBlocked = ResultAsk, unsafeRedirect.Reason, unsafeRedirect.BlockedCommand
+		case !allMatched:
+			log.Log("DEFER: unsafe redirect, but command not allow-matched; native validates the target")
+		case autoMode:
+			log.Log("DEFER: unsafe redirect on otherwise-allowed command (auto mode; classifier reviews it): %s", unsafeRedirect.Reason)
+			if worst == ResultAllowed {
+				worst, worstReason, worstBlocked = ResultDefer, unsafeRedirect.Reason, unsafeRedirect.BlockedCommand
+			}
+		default:
+			log.Log("ASK: unsafe redirect on otherwise-allowed command: %s", unsafeRedirect.Reason)
+			worst, worstReason, worstBlocked = ResultAsk, unsafeRedirect.Reason, unsafeRedirect.BlockedCommand
+		}
 	}
 
 	if worst == ResultAllowed {
 		reason := fmt.Sprintf("all %d sub-command(s) matched", len(commands))
 		log.Log("ALLOW: %s", reason)
 		return Result{Kind: ResultAllowed, Reason: reason}
-	}
-	if unsafeRedirect != nil && worst == ResultDefer {
-		log.Log("DEFER: unsafe redirect, but command not allow-matched; native validates the target")
 	}
 	return Result{Kind: worst, Reason: worstReason, BlockedCommand: worstBlocked}
 }
@@ -569,6 +602,7 @@ func checkWritePath(label, raw, target string, literal bool, cwd string, additio
 			Kind:           ResultAsk,
 			Reason:         fmt.Sprintf("%s to protected directory: %q (resolved to %s)", label, target, resolved),
 			BlockedCommand: raw,
+			Protected:      true,
 		}
 	}
 
@@ -586,17 +620,27 @@ func checkWritePath(label, raw, target string, literal bool, cwd string, additio
 }
 
 // checkInPlaceWrite validates the file operands of an in-place editing command
-// (sed -i, perl -i, gawk -i inplace). It returns the first unsafe target, or nil
+// (sed -i, perl -i, gawk -i inplace). It returns the first unsafe target (preferring a protected one), or nil
 // when the command edits nothing in place or every target is inside an allowed
 // directory.
 func checkInPlaceWrite(cmd parser.Command, cwd string, additionalDirs []string, hasPathMutator bool, log *logfile.Logger) *Result {
+	var unsafe *Result
 	for _, t := range cmd.InPlaceTargets {
 		result := checkWritePath("in-place edit", t.Raw, t.Path, t.Literal, cwd, additionalDirs, hasPathMutator, log)
 		if result.Kind != ResultAllowed {
-			return &result
+			unsafe = strongerWrite(unsafe, result)
 		}
 	}
-	return nil
+	return unsafe
+}
+
+// strongerWrite keeps the first unsafe write unless next is protected and it
+// isn't, so a protected target can't hide behind one auto mode would defer.
+func strongerWrite(current *Result, next Result) *Result {
+	if current == nil || (next.Protected && !current.Protected) {
+		return &next
+	}
+	return current
 }
 
 func truncate(s string, n int) string {

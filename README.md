@@ -38,6 +38,8 @@ Defer keeps the hook **additive** for top-level commands -- it only *upgrades* t
 - an **`xargs` payload** whose static form matches only an exact rule that doesn't cover the stdin args native strips-and-approves blind to;
 - a **mutating `find` action** (`-delete`, `-fprintf`, `-ok`, ...) or an unreadable `find` payload that could otherwise ride a broad `Bash(find *)`.
 
+**In auto mode** (`permission_mode: auto` in the hook input) the classifier reads the full text of any command the hook gives no decision on, so nested commands and unsafe write targets defer to it rather than prompting. Explicit `ask` rules, writes the hook can resolve into `.git`/`.claude`, and the `xargs` and `find` hazards above still prompt, and `deny` rules still win. A relative write after `cd` can't be resolved, so it defers too. Other permission modes are unchanged.
+
 ### What gets checked
 
 **Full AST walk** -- commands inside `$(...)`, `` `...` ``, `<(...)`, subshells, loops, if-branches, case statements, heredocs, and function bodies are all extracted and checked individually.

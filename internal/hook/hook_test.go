@@ -589,6 +589,56 @@ func TestProcessRedirectAllowedCommandAsks(t *testing.T) {
 	}
 }
 
+// In auto mode the classifier reviews whatever the hook defers, so inferred asks
+// defer. Each case also runs with no mode to pin the unchanged behavior.
+func TestProcessAutoMode(t *testing.T) {
+	allow := patterns("Bash(sed:*)", "Bash(node:*)", "Bash(find *)", "Bash(rm /tmp/safe)")
+	ask := patterns("Bash(curl:*)")
+	deny := patterns("Bash(shred:*)")
+
+	cases := []struct {
+		name     string
+		cmd      string
+		wantAuto ResultKind
+		wantElse ResultKind
+	}{
+		{"nested unapproved", `echo "$(perl -e 1)"`, ResultDefer, ResultAsk},
+		{"redirect outside cwd", `node a.js > /etc/hosts`, ResultDefer, ResultAsk},
+		{"relative redirect after cd", `cd sub && node a.js > out`, ResultDefer, ResultAsk},
+		{"in-place outside cwd", `sed -i '' s/a/b/ /etc/hosts`, ResultDefer, ResultAsk},
+		{"top-level unapproved", `perl -e 1`, ResultDefer, ResultDefer},
+		{"allowed stays allowed", `sed -i '' s/a/b/ src/main.go`, ResultAllowed, ResultAllowed},
+
+		{"protected redirect", `node a.js > .git/config`, ResultAsk, ResultAsk},
+		{"protected after unsafe redirect", `node a.js > /etc/hosts > .git/config`, ResultAsk, ResultAsk},
+		{"protected in-place", `sed -i '' s/a/b/ .git/config`, ResultAsk, ResultAsk},
+		{"protected after unsafe in-place", `sed -i '' s/a/b/ /etc/hosts .git/config`, ResultAsk, ResultAsk},
+		{"protected redirect after deferred in-place", `sed -i '' s/a/b/ /etc/hosts > .git/config`, ResultAsk, ResultAsk},
+		{"protected redirect with nested sibling", `echo "$(perl -e 1)" > .git/config`, ResultAsk, ResultAsk},
+		{"protected redirect on unmatched command", `perl -e 1 > .git/config`, ResultAsk, ResultDefer},
+		{"protected in-place with unmatched sibling", `sed -i '' s/a/b/ .git/config; perl -e 1`, ResultAsk, ResultAsk},
+		{"protected in-place then deferred in-place", `sed -i '' s/a/b/ .git/config; sed -i '' s/a/b/ /etc/hosts`, ResultAsk, ResultAsk},
+		{"nested explicit ask rule", `echo "$(curl example.com)"`, ResultAsk, ResultAsk},
+		{"find hazard", `find . -ok rm {} \;`, ResultAsk, ResultAsk},
+		{"xargs hazard", `echo hi | xargs rm /tmp/safe`, ResultAsk, ResultAsk},
+		{"nested deny rule", `echo "$(shred x)"`, ResultDenyRule, ResultDenyRule},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			for mode, want := range map[string]ResultKind{"auto": tc.wantAuto, "": tc.wantElse, "default": tc.wantElse} {
+				input := &HookInput{
+					ToolName:       "Bash",
+					ToolInput:      ToolInput{Command: tc.cmd},
+					Cwd:            "/tmp/project",
+					PermissionMode: mode,
+				}
+				result := Process(input, allow, ask, deny, nil, nopLog())
+				assert.Equalf(t, want, result.Kind, "mode %q: %s", mode, result.Reason)
+			}
+		})
+	}
+}
+
 // In-place editors (sed -i, perl -i, gawk -i inplace) rewrite a file passed as
 // a positional argument, which native's redirect check never sees. The hook
 // path-scopes those targets like redirect targets.
